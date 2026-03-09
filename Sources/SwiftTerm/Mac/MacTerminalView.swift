@@ -52,9 +52,23 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         
         public init(font baseFont: NSFont, fontSize: CGFloat? = nil) {
             self.normal = baseFont
-            self.bold = NSFontManager.shared.convert(baseFont, toHaveTrait: [.boldFontMask])
-            self.italic = NSFontManager.shared.convert(baseFont, toHaveTrait: [.italicFontMask])
-            self.boldItalic = NSFontManager.shared.convert(baseFont, toHaveTrait: [.italicFontMask, .boldFontMask])
+            self.bold = FontSet.convert(baseFont, traits: [.boldFontMask])
+            self.italic = FontSet.convert(baseFont, traits: [.italicFontMask])
+            self.boldItalic = FontSet.convert(baseFont, traits: [.italicFontMask, .boldFontMask])
+        }
+
+        /// Converts a font to the given traits while preserving the cascade list
+        /// from the original font descriptor. `NSFontManager.convert()` drops
+        /// descriptor attributes like `.cascadeList`, breaking font fallback for
+        /// PUA glyphs (Powerline, Nerd Font symbols) in bold/italic text.
+        private static func convert(_ baseFont: NSFont, traits: NSFontTraitMask) -> NSFont {
+            let converted = NSFontManager.shared.convert(baseFont, toHaveTrait: traits)
+            if let cascadeList = baseFont.fontDescriptor.object(forKey: .cascadeList) as? [NSFontDescriptor],
+               !cascadeList.isEmpty {
+                let descriptor = converted.fontDescriptor.addingAttributes([.cascadeList: cascadeList])
+                return NSFont(descriptor: descriptor, size: converted.pointSize) ?? converted
+            }
+            return converted
         }
 
         // Expected by the shared rendering code
