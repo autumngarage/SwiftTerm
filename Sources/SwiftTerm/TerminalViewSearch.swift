@@ -51,6 +51,13 @@ extension TerminalView {
         return false
     }
 
+    /// Returns the total number of matches for `term` in the scrollback buffer.
+    /// Capped at `limit` to avoid excessive computation on very large buffers.
+    public func matchCount (_ term: String, options: SearchOptions = SearchOptions(), limit: Int = 999) -> Int {
+        guard let search else { return 0 }
+        return search.findAll(term: term, options: options, limit: limit).count
+    }
+
     /// Clears the current search state and selection.
     public func clearSearch () {
         search?.reset()
