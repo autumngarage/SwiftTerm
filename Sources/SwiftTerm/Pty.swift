@@ -67,25 +67,45 @@ public class PseudoTerminalHelpers {
      */
     public static func fork (andExec: String, args: [String], env: [String], currentDirectory: String? = nil, desiredWindowSize: inout winsize) -> (pid: pid_t, masterFd: Int32)?
     {
+        // Pre-compute ALL C strings before fork.
+        // After fork, the child must avoid Swift runtime calls (String ops,
+        // closures, Array allocation) because another thread may have held
+        // an os_unfair_lock at fork time, leaving it permanently locked in
+        // the child — causing "crashed on child side of fork pre-exec".
+
+        let cExec = strdup(andExec)!
+        let cDir = currentDirectory.map { strdup($0)! }
+
+        // Build null-terminated C arrays for args and env
+        var cArgs = args.map { strdup($0)! as UnsafeMutablePointer<CChar>? }
+        cArgs.append(nil)
+        var cEnv = env.map { strdup($0)! as UnsafeMutablePointer<CChar>? }
+        cEnv.append(nil)
+
         var master: Int32 = 0
-        
+
         let pid = forkpty(&master, nil, nil, &desiredWindowSize)
         if pid < 0 {
+            // Clean up on fork failure
+            free(cExec)
+            cDir.map { free($0) }
+            for p in cArgs { p.map { free($0) } }
+            for p in cEnv { p.map { free($0) } }
             return nil
         }
         if pid == 0 {
-            if let currentDirectory {
-                _ = currentDirectory.withCString { p in
-                    chdir(p)
-                }
-            }
-            
-            withArrayOfCStrings(args, { pargs in
-                withArrayOfCStrings(env, { penv in
-                    let _ = execve(andExec, pargs, penv)
-                })
-            })
+            // Child process — only raw C calls from here to execve
+            if let dir = cDir { _ = chdir(dir) }
+            execve(cExec, &cArgs, &cEnv)
+            _exit(1) // execve failed
         }
+
+        // Parent — free the copies (child has execve'd, so its copies are gone)
+        free(cExec)
+        cDir.map { free($0) }
+        for p in cArgs { p.map { free($0) } }
+        for p in cEnv { p.map { free($0) } }
+
         return (pid, master)
     }
     
