@@ -218,10 +218,10 @@ class CircularList<T> {
     }
 }
 
-internal class CircularBufferLineList {
+public class CircularBufferLineList {
     private var array: [BufferLine?]
     private var startIndex: Int
-    var count: Int {
+    public var count: Int {
         get {
             return _count
         }
@@ -300,7 +300,7 @@ internal class CircularBufferLineList {
         return getCyclicIndex(index)
     }
 
-    subscript (index: Int) -> BufferLine {
+    public subscript (index: Int) -> BufferLine {
         _read {
             let idx = getCyclicIndex(index)
             if array[idx] == nil {
