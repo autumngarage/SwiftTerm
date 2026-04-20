@@ -72,7 +72,12 @@ extension TerminalView {
     {
         resetCaches()
         self.cellDimension = computeFontDimensions ()
-        let newCols = Int(frame.width / cellDimension.width)
+        // Use the effective width (excluding the platform scroller) so the grid
+        // stops one column short of the scroller gutter. Using raw frame.width
+        // here desynchronises cols from processSizeChange's effective-width
+        // math and causes cells/caret to paint into the region occluded by
+        // the NSScroller subview — visible as phantom rectangles at EOL.
+        let newCols = Int(getEffectiveWidth(size: frame.size) / cellDimension.width)
         let newRows = Int(frame.height / cellDimension.height)
         resize(cols: newCols, rows: newRows)
         updateCaretView()
