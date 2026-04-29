@@ -1620,6 +1620,7 @@ extension TerminalView {
      */
     public func send(data: ArraySlice<UInt8>)
     {
+        terminal.interruptSynchronizedOutputForUserInput()
         ensureCaretIsVisible ()
         #if os(iOS) || os(visionOS)
         if TerminalView.textInputDebugEnabled {

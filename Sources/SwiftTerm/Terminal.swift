@@ -2569,6 +2569,7 @@ open class Terminal {
                             line [colTarget+col] = lr [col]
                         }
                     }
+                    updateRange (startLine: rowTarget, endLine: min (rows-1, rowTarget + bottom - top))
                 }
             }
         }
@@ -2590,6 +2591,7 @@ open class Terminal {
                         line [col] = fillData
                     }
                 }
+                updateRange (startLine: top, endLine: bottom)
             }
         } else {
             log ("Not implemented CSI x with collect: collect=\(collect) and pars=\(pars)")
@@ -2620,6 +2622,7 @@ open class Terminal {
                 line.insertCells(pos: buffer.x, n: n, rightMargin: marginMode ? buffer.marginRight : cols-1, fillData: buffer.getNullCell())
                 line.isWrapped = false
             }
+            updateRange (startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
             return
         } else {
             log ("CSI # } not implemented- XTPOPSGR with \(pars)")
@@ -2696,6 +2699,7 @@ open class Terminal {
                     line [col] = fillData
                 }
             }
+            updateRange (startLine: top, endLine: bottom)
         }
     }
 
@@ -2728,6 +2732,7 @@ open class Terminal {
                     line [col] = cd
                 }
             }
+            updateRange (startLine: top, endLine: bottom)
         }
     }
     /**
@@ -4449,6 +4454,7 @@ open class Terminal {
             start: buffer.x,
             end: buffer.x + p,
             fillData: CharData (attribute:  eraseAttr ()))
+        updateRange (buffer.y)
     }
 
     func csiT (_ pars: [Int], _ collect: cstring)
@@ -5292,6 +5298,11 @@ open class Terminal {
         synchronizedOutputTimeoutItem = nil
         refresh (startRow: 0, endRow: rows - 1)
         tdel?.synchronizedOutputChanged(source: self, active: false)
+    }
+
+    func interruptSynchronizedOutputForUserInput ()
+    {
+        endSynchronizedOutput()
     }
 
     private func scheduleSynchronizedOutputTimeout ()
