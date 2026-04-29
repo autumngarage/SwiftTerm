@@ -2879,6 +2879,7 @@ extension TerminalView {
         assert(Thread.isMainThread, "TerminalView.send(data:) must be called on the main thread")
         #endif
         recordUserInput()
+        terminal.interruptSynchronizedOutputForUserInput()
         ensureCaretIsVisible ()
         #if os(iOS) || os(visionOS)
         if TerminalView.textInputDebugEnabled {
