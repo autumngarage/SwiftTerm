@@ -9,6 +9,9 @@
 // TODO: audit every location to use restrictCursor
 
 import Foundation
+import os
+
+private let terminalProtocolLogger = Logger(subsystem: "com.vesper", category: "terminal-protocol")
 
 /**
  * The terminal delegate is a protocol that must be implemented by a class
@@ -1600,8 +1603,10 @@ open class Terminal {
     func oscHyperlink (_ data: ArraySlice<UInt8>)
     {
         let buffer = self.buffer
-        if data.count == 1 && data [data.startIndex] == UInt8 (ascii: ";") {
-            // We only had the terminator, so we can close ";"
+        if !data.isEmpty && data.allSatisfy({ $0 == UInt8(ascii: ";") }) {
+            // Empty OSC 8 params + URI closes the active hyperlink. Depending
+            // on parser splitting, the standard `OSC 8 ;; ST` close sequence
+            // can arrive here as either `;` or `;;`.
             if let hlt = hyperLinkTracking {
                 let str = hlt.payload
                 if let urlToken = TinyAtom.lookup (value: str) {
@@ -1639,11 +1644,13 @@ open class Terminal {
         guard data.count >= 2,
               data[data.startIndex] == UInt8(ascii: "c"),
               data[data.startIndex+1] == UInt8(ascii: ";") else {
+            terminalProtocolLogger.warning("Ignoring malformed OSC 52 clipboard payload: missing clipboard target")
             return
         }
         
         let base64 = Data(data[(data.startIndex+2)...])
         guard let content = Data(base64Encoded: base64) else {
+            terminalProtocolLogger.warning("Ignoring malformed OSC 52 clipboard payload: invalid base64")
             return
         }
         
@@ -3525,6 +3532,7 @@ open class Terminal {
         var style = curAttr.style
         var fg = curAttr.fg
         var bg = curAttr.bg
+        var underlineStyle = curAttr.underlineStyle
         var underlineColor = curAttr.underlineColor
         let def = CharData.defaultAttr
 
@@ -3635,6 +3643,31 @@ open class Terminal {
             }
             return color
         }
+
+        func parseUnderlineStyle() -> Attribute.UnderlineStyle? {
+            guard i < parCount else { return .single }
+            let usesColon = (i - 1 >= 0 &&
+                             i - 1 < paramSeparators.count &&
+                             paramSeparators[i - 1] == UInt8(ascii: ":"))
+            guard usesColon else { return .single }
+
+            switch pars[i] {
+            case 0:
+                return Attribute.UnderlineStyle.none
+            case 1:
+                return .single
+            case 2:
+                return .double
+            case 3:
+                return .curly
+            case 4:
+                return .dotted
+            case 5:
+                return .dashed
+            default:
+                return .single
+            }
+        }
         
         while i < parCount {
             var p = pars [i]
@@ -3644,6 +3677,7 @@ open class Terminal {
                 style = def.style
                 fg = def.fg
                 bg = def.bg
+                underlineStyle = def.underlineStyle
                 underlineColor = def.underlineColor
             case 1:
                 // bold text
@@ -3656,7 +3690,21 @@ open class Terminal {
                 style = [style, .italic]
             case 4:
                 // underlined text
+                if i + 1 < parCount,
+                   i < paramSeparators.count,
+                   paramSeparators[i] == UInt8(ascii: ":") {
+                    i += 1
+                    underlineStyle = parseUnderlineStyle() ?? .single
+                    if underlineStyle == .none {
+                        style.remove(.underline)
+                    } else {
+                        style = [style, .underline]
+                    }
+                    i += 1
+                    continue
+                }
                 style = [style, .underline]
+                underlineStyle = .single
             case 5:
                 // blink
                 style = [style, .blink]
@@ -3671,7 +3719,8 @@ open class Terminal {
                 style = [style, .crossedOut]
             case 21:
                 // double underline
-                break
+                style = [style, .underline]
+                underlineStyle = .double
             case 22:
                 // not bold nor faint
                 style.remove (.bold)
@@ -3682,6 +3731,7 @@ open class Terminal {
             case 24:
                 // not underlined
                 style.remove (.underline)
+                underlineStyle = .none
             case 25:
                 // not blink
                 style.remove (.blink)
@@ -3744,7 +3794,7 @@ open class Terminal {
             }
             i += 1
         }
-        curAttr = Attribute(fg: fg, bg: bg, style: style, underlineColor: underlineColor)
+        curAttr = Attribute(fg: fg, bg: bg, style: style, underlineStyle: underlineStyle, underlineColor: underlineColor)
     }
 
     //

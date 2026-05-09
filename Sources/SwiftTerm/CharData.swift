@@ -56,6 +56,15 @@ public struct CharacterStyle : OptionSet, Hashable {
 /// should be drawn as.
 ///
 public struct Attribute: Equatable, Hashable {
+    public enum UnderlineStyle: Equatable, Hashable {
+        case none
+        case single
+        case double
+        case curly
+        case dotted
+        case dashed
+    }
+
     /// The various ways in which the color was expressed
     public enum Color: Equatable, Hashable {
         /// This means that the foreground color stores 8 bits of information
@@ -100,18 +109,24 @@ public struct Attribute: Equatable, Hashable {
     public private(set) var fg, bg: Color
     // The cell attributes
     public private(set) var style: CharacterStyle
+    /// The underline variant requested by SGR 4, 4:x, or 21.
+    public private(set) var underlineStyle: UnderlineStyle = .none
     /// Optional underline color
     public private(set) var underlineColor: Color? = nil
     
     public static func ==(lhs: Attribute, rhs: Attribute) -> Bool
     {
-        lhs.style == rhs.style && lhs.fg == rhs.fg && lhs.bg == rhs.bg && lhs.underlineColor == rhs.underlineColor
+        lhs.style == rhs.style &&
+            lhs.fg == rhs.fg &&
+            lhs.bg == rhs.bg &&
+            lhs.underlineStyle == rhs.underlineStyle &&
+            lhs.underlineColor == rhs.underlineColor
     }
     
     // Returns an attribute with just the colors
     func justColor () -> Attribute
     {
-        Attribute (fg: fg, bg: bg, style: .none, underlineColor: underlineColor)
+        Attribute (fg: fg, bg: bg, style: .none, underlineStyle: .none, underlineColor: underlineColor)
     }
     
     // Temporary, longer term in Attribute we will add a proper encoding
