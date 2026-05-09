@@ -2663,7 +2663,12 @@ open class Terminal {
 
     func oscHyperlink (_ data: ArraySlice<UInt8>)
     {
-        if data.count == 1 && data [data.startIndex] == UInt8 (ascii: ";") {
+        // `OSC 8 ; ; ST` closes the active hyperlink, and by the time the
+        // parameters reach here the payload is only semicolons. How many
+        // depends on where the parser split the sequence, so it arrives as
+        // either ";" or ";;"; matching a single one left the link open and
+        // attributed every following cell to the previous URL.
+        if !data.isEmpty && data.allSatisfy({ $0 == UInt8 (ascii: ";") }) {
             activeHyperlink = nil
         } else {
             let payload = String(bytes: data, encoding: .ascii) ?? ""

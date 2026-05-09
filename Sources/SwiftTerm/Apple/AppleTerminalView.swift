@@ -903,6 +903,14 @@ extension TerminalView {
         if flags.contains (.dim) {
             fgColor = fgColor.dimmedColor (towards: bgColor)
         }
+        // SGR 8 (invisible). The cell keeps its column and its background; only
+        // the glyph must not be legible. Drawing the foreground in the
+        // background colour is what xterm and its descendants do, and unlike
+        // skipping the draw it leaves the text selectable and copyable, which
+        // is the behaviour a password prompt using SGR 8 relies on.
+        if flags.contains (.invisible) {
+            fgColor = bgColor
+        }
         var nsattr: [NSAttributedString.Key:Any] = [
             .font: tf,
             .foregroundColor: fgColor,
