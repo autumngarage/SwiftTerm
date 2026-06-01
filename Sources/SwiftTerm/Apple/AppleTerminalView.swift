@@ -79,6 +79,7 @@ struct ViewLineInfo {
 
 extension TerminalView {
     typealias CellDimension = CGSize
+    private static let minimumExplicitBackgroundForegroundContrast: Double = 4.5
 
     func resetCaches ()
     {
@@ -376,6 +377,106 @@ extension TerminalView {
         return nsattr
     }
 
+    private static func hasExplicitBackground(_ color: Attribute.Color) -> Bool {
+        switch color {
+        case .ansi256, .trueColor:
+            return true
+        case .defaultColor, .defaultInvertedColor:
+            return false
+        }
+    }
+
+    private static func rgbaComponents(_ color: TTColor) -> (red: Double, green: Double, blue: Double, alpha: Double)? {
+        #if os(macOS)
+        guard let rgb = color.usingColorSpace(.deviceRGB) else { return nil }
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 1
+        rgb.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        #else
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 1
+        guard color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else { return nil }
+        #endif
+
+        return (Double(red), Double(green), Double(blue), Double(alpha))
+    }
+
+    private static func srgbToLinear(_ value: Double) -> Double {
+        value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+    }
+
+    private static func relativeLuminance(_ color: TTColor) -> Double? {
+        guard let rgba = rgbaComponents(color) else { return nil }
+        let red = srgbToLinear(rgba.red)
+        let green = srgbToLinear(rgba.green)
+        let blue = srgbToLinear(rgba.blue)
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    }
+
+    private static func contrastRatio(_ a: TTColor, _ b: TTColor) -> Double? {
+        guard let first = relativeLuminance(a),
+              let second = relativeLuminance(b) else {
+            return nil
+        }
+        let lighter = max(first, second)
+        let darker = min(first, second)
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    private static func mix(_ first: TTColor, _ second: TTColor, ratio: Double) -> TTColor? {
+        guard let a = rgbaComponents(first),
+              let b = rgbaComponents(second) else {
+            return nil
+        }
+        let clamped = max(0, min(1, ratio))
+        let inverse = 1 - clamped
+        return TTColor.make(
+            red: CGFloat(a.red * inverse + b.red * clamped),
+            green: CGFloat(a.green * inverse + b.green * clamped),
+            blue: CGFloat(a.blue * inverse + b.blue * clamped),
+            alpha: CGFloat(a.alpha)
+        )
+    }
+
+    private static func contrastAdjustedForeground(_ foreground: TTColor, against background: TTColor) -> TTColor {
+        let minimum = minimumExplicitBackgroundForegroundContrast
+        guard let currentContrast = contrastRatio(foreground, background),
+              currentContrast < minimum,
+              let foregroundComponents = rgbaComponents(foreground) else {
+            return foreground
+        }
+
+        let white = TTColor.make(red: 1, green: 1, blue: 1, alpha: CGFloat(foregroundComponents.alpha))
+        let black = TTColor.make(red: 0, green: 0, blue: 0, alpha: CGFloat(foregroundComponents.alpha))
+        let whiteContrast = contrastRatio(white, background) ?? 0
+        let blackContrast = contrastRatio(black, background) ?? 0
+        let anchor = whiteContrast >= blackContrast ? white : black
+
+        var low = 0.0
+        var high = 1.0
+        var best = anchor
+
+        for _ in 0..<18 {
+            let mid = (low + high) / 2
+            guard let candidate = mix(foreground, anchor, ratio: mid),
+                  let contrast = contrastRatio(candidate, background) else {
+                break
+            }
+            if contrast >= minimum {
+                best = candidate
+                high = mid
+            } else {
+                low = mid
+            }
+        }
+
+        return best
+    }
+
     //
     // Given a vt100 attribute, return the NSAttributedString attributes used to render it
     //
@@ -426,6 +527,9 @@ extension TerminalView {
             fgColor = fgColor.dimmedColor()
         }
         let bgColor = mapColor(color: bg, isFg: false, isBold: false)
+        if Self.hasExplicitBackground(bg) && !flags.contains(.invisible) {
+            fgColor = Self.contrastAdjustedForeground(fgColor, against: bgColor)
+        }
         if flags.contains(.invisible) {
             fgColor = bgColor
         }
