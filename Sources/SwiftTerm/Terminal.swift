@@ -613,6 +613,11 @@ open class Terminal {
         }
     }
 
+    /// True while a mouse report is synchronously sent to the terminal
+    /// delegate. Consumers that distinguish user input from terminal-generated
+    /// protocol replies can preserve the mouse event's user origin.
+    public private(set) var isSendingMouseEvent = false
+
     // The next four variables determine whether setting/querying should be done using utf8 or latin1
     // and whether the values should be set or queried using hex digits, rather than actual byte streams
     var xtermTitleSetUtf = false
@@ -5510,6 +5515,8 @@ open class Terminal {
      */
     public func sendEvent (buttonFlags: Int, x: Int, y: Int, pixelX: Int, pixelY: Int)
     {
+        isSendingMouseEvent = true
+        defer { isSendingMouseEvent = false }
         //print ("got \(mouseProtocol)")
         switch mouseProtocol {
         case .x10:
