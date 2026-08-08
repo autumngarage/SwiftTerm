@@ -3998,7 +3998,9 @@ open class Terminal {
                 }
                 refresh (startRow: 0, endRow: rows - 1)
                 syncScrollArea ()
-                showCursor ()
+                // Preserve the prior DECTCEM (CSI ? 25 l) state across the buffer
+                // switch (see the matching note on the alt-buffer enter path).
+                showCursorPreservingHiddenState ()
                 tdel?.bufferActivated(source: self)
                 
             case 2004: // bracketed paste mode (https://cirw.in/blog/bracketed-paste)
@@ -4234,7 +4236,12 @@ open class Terminal {
                 activateAltBuffer (fillAttr: nil)
                 refresh (startRow: 0, endRow: rows - 1)
                 syncScrollArea ()
-                showCursor ()
+                // Preserve the prior DECTCEM (CSI ? 25 l) state across the buffer
+                // switch: showCursor() below would otherwise clear an explicit
+                // hide and re-add the caret, producing a double cursor for TUIs
+                // that draw their own. Buffer selection and cursor visibility are
+                // independent terminal states.
+                showCursorPreservingHiddenState ()
                 tdel?.bufferActivated(source: self)
                 
             case 2004: // bracketed paste mode (https://cirw.in/blog/bracketed-paste)
@@ -5440,6 +5447,20 @@ open class Terminal {
         }
         cursorHidden = true
         tdel?.hideCursor(source: self)
+    }
+
+    /// Re-apply the caret for the current buffer without altering DECTCEM
+    /// visibility. Used on screen-buffer switches (DECSET 47/1047/1049), which
+    /// need to ensure the caret view reflects the active buffer but must not
+    /// clear an explicit `CSI ? 25 l` hide. Buffer selection and cursor
+    /// visibility are independent terminal states.
+    func showCursorPreservingHiddenState ()
+    {
+        let wasHidden = cursorHidden
+        showCursor()
+        if wasHidden {
+            hideCursor()
+        }
     }
 
     // Encode button and position to characters
