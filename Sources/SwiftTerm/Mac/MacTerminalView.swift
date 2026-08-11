@@ -1162,13 +1162,25 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     func zoomOut (sender: Any) {}
     func zoomReset (sender: Any) {}
     
-    // Returns the vt100 mouseflags
-    func encodeMouseEvent (with event: NSEvent, overwriteRelease: Bool = false) -> Int
+    /// `true` when the event reports a mouse button going up.
+    static func isMouseReleaseEvent (_ event: NSEvent) -> Bool
+    {
+        [NSEvent.EventType.leftMouseUp, .otherMouseUp, .rightMouseUp].contains(event.type)
+    }
+
+    /// Returns the vt100 mouseflags
+    ///
+    /// - Parameter noButtonHeld: pass `true` for pure pointer motion. X10 encodes
+    ///   "no button is held" with the same value it uses for "a button was released"
+    ///   (3), so this shares `encodeButton`'s `release` argument. The two cases are
+    ///   only distinguishable by the SGR terminator, which comes from the caller via
+    ///   `sendEvent(..., release:)` — never from this value.
+    func encodeMouseEvent (with event: NSEvent, noButtonHeld: Bool = false) -> Int
     {
         let flags = event.modifierFlags
-        let isReleaseEvent = overwriteRelease || [NSEvent.EventType.leftMouseUp, .otherMouseUp, .rightMouseUp].contains(event.type)
-        
-        return terminal.encodeButton(button: event.buttonNumber, release: isReleaseEvent, shift: flags.contains(.shift), meta: flags.contains(.option), control: flags.contains(.control))
+        let noButtonDown = noButtonHeld || Self.isMouseReleaseEvent (event)
+
+        return terminal.encodeButton(button: event.buttonNumber, release: noButtonDown, shift: flags.contains(.shift), meta: flags.contains(.option), control: flags.contains(.control))
     }
     
     public func calculateMouseHit (with event: NSEvent) -> (grid: Position, pixels: Position)
@@ -1201,7 +1213,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         let hit = calculateMouseHit(with: event)
         let buttonFlags = encodeMouseEvent(with: event)
         let screenRow = max (0, min (displayBuffer.rows - 1, hit.grid.row - displayBuffer.yDisp))
-        terminal.sendEvent(buttonFlags: buttonFlags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
+        terminal.sendEvent(buttonFlags: buttonFlags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row, release: Self.isMouseReleaseEvent (event))
     }
     
     private var autoScrollDelta = 0
@@ -1387,7 +1399,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
         
         if terminal.mouseMode.sendMotionEvent() {
-            let flags = encodeMouseEvent(with: event, overwriteRelease: true)
+            let flags = encodeMouseEvent(with: event, noButtonHeld: true)
             terminal.sendMotion(buttonFlags: flags, x: hit.grid.col, y: hit.grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
         }
     }

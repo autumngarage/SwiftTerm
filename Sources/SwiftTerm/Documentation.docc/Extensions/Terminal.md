@@ -101,8 +101,8 @@ queue and the terminal will synchronize internally.
 
 - ``MouseMode``
 - ``encodeButton(button:release:shift:meta:control:)``
-- ``sendEvent(buttonFlags:x:y:)``
-- ``sendEvent(buttonFlags:x:y:pixelX:pixelY:)``
+- ``sendEvent(buttonFlags:x:y:release:)``
+- ``sendEvent(buttonFlags:x:y:pixelX:pixelY:release:)``
 - ``sendMotion(buttonFlags:x:y:pixelX:pixelY:)``
 
 ### Titles

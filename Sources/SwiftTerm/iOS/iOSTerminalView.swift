@@ -533,7 +533,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     {
         let hit = calculateTapHit(gesture: gestureRecognizer)
         if let grid = hit.grid.toScreenCoordinate(from: terminal.displayBuffer) {
-            terminal.sendEvent(buttonFlags: encodeFlags (release: release), x: grid.col, y: grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
+            terminal.sendEvent(buttonFlags: encodeFlags (release: release), x: grid.col, y: grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row, release: release)
         }
     }
     

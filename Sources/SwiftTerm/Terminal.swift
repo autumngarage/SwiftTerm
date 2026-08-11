@@ -5524,34 +5524,35 @@ open class Terminal {
         return value
     }
     
-    public func sendEvent (buttonFlags: Int, x: Int, y: Int) {
-      sendEvent(buttonFlags: buttonFlags, x: x, y: y, pixelX: x, pixelY: y)
+    public func sendEvent (buttonFlags: Int, x: Int, y: Int, release: Bool) {
+      sendEvent(buttonFlags: buttonFlags, x: x, y: y, pixelX: x, pixelY: y, release: release)
     }
-    
+
     /**
      * Sends a mouse event for a specific button at the specific location
      * - Parameter buttonFlags: Button flags encoded in Cb mode.
      * - Parameter x: X coordinate for the event
      * - Parameter y: Y coordinate for the event
+     * - Parameter release: `true` when this reports a button release, `false` for a
+     *   press or for pointer motion. The SGR protocols carry press-versus-release in
+     *   the terminator (`M`/`m`) rather than in the button field, and only the caller
+     *   knows which one it has: X10 encodes both "button released" and "no button
+     *   held" as the same low bits (`11`), so the button value cannot be used to
+     *   recover this. Deriving it from `buttonFlags` reported every bare hover under
+     *   mouse mode 1003 as a left-button release (issue #701).
      */
-    public func sendEvent (buttonFlags: Int, x: Int, y: Int, pixelX: Int, pixelY: Int)
+    public func sendEvent (buttonFlags: Int, x: Int, y: Int, pixelX: Int, pixelY: Int, release: Bool)
     {
         isSendingMouseEvent = true
         defer { isSendingMouseEvent = false }
-        //print ("got \(mouseProtocol)")
         switch mouseProtocol {
         case .x10:
             sendResponse(cc.CSI, "M", [UInt8(buttonFlags+32), min (UInt8(255), UInt8(32 + x+1)), min (UInt8(255), UInt8(32+y+1))])
         case .sgr:
-            let bflags : Int = ((buttonFlags & 3) == 3) ? (buttonFlags & ~3) : buttonFlags
-            let m = ((buttonFlags & 3) == 3) ? "m" : "M"
-            sendResponse(cc.CSI, "<\(bflags);\(x+1);\(y+1)\(m)")
+            sendResponse(cc.CSI, "<\(sgrButton (buttonFlags, release: release));\(x+1);\(y+1)\(release ? "m" : "M")")
         case .sgrPixel:
-            let bflags : Int = ((buttonFlags & 3) == 3) ? (buttonFlags & ~3) : buttonFlags
-            let m = ((buttonFlags & 3) == 3) ? "m" : "M"
-            print ("\(pixelX);\(pixelY)")
-            sendResponse(cc.CSI, "<\(bflags);\(pixelX);\(pixelY)\(m)")
-            
+            sendResponse(cc.CSI, "<\(sgrButton (buttonFlags, release: release));\(pixelX);\(pixelY)\(release ? "m" : "M")")
+
         case .urxvt:
             sendResponse(cc.CSI, "\(buttonFlags+32);\(x+1);\(y+1)M");
         case .utf8:
@@ -5562,16 +5563,56 @@ open class Terminal {
             sendResponse(cc.CSI, buffer)
         }
     }
-    
+
+    /// Maps an X10-encoded button value to the button field of an SGR report.
+    ///
+    /// `encodeButton` collapses every release to the X10 "button released" value `3`,
+    /// which is not a button number: under SGR the terminator says it was a release and
+    /// the button field says which button it was. Clearing the low bits leaves button 0
+    /// — which button was released is already lost by the time this runs, an upstream
+    /// limitation this change does not alter. Non-release reports pass through
+    /// untouched, so pointer motion with no button held keeps its `3`.
+    private func sgrButton (_ buttonFlags: Int, release: Bool) -> Int
+    {
+        release ? (buttonFlags & ~3) : buttonFlags
+    }
+
+    // The pre-`release:` overloads are kept as unavailable declarations so a call site
+    // that has not migrated fails with a diagnostic naming its replacement instead of a
+    // bare missing-argument error. They are not compatibility shims: there is nothing
+    // correct for a shim to forward, because the release fact these callers omit is the
+    // one that cannot be recovered from `buttonFlags` (issue #701). Forwarding the old
+    // inference would keep reporting hovers as left-button releases, so the migration is
+    // a compile error by design — stating `release:` is a one-word edit at a call site
+    // that already knows the answer.
+
+    @available(*, unavailable, renamed: "sendEvent(buttonFlags:x:y:release:)",
+                message: "Mouse reports must state whether they are a release. X10 gives 'a button was released' and 'no button is held' the same value, so it cannot be inferred from buttonFlags: pass release: true from button-up handlers, release: false from press and motion handlers.")
+    public func sendEvent (buttonFlags: Int, x: Int, y: Int) {
+        fatalError ("unavailable")
+    }
+
+    @available(*, unavailable, renamed: "sendEvent(buttonFlags:x:y:pixelX:pixelY:release:)",
+                message: "Mouse reports must state whether they are a release. X10 gives 'a button was released' and 'no button is held' the same value, so it cannot be inferred from buttonFlags: pass release: true from button-up handlers, release: false from press and motion handlers.")
+    public func sendEvent (buttonFlags: Int, x: Int, y: Int, pixelX: Int, pixelY: Int) {
+        fatalError ("unavailable")
+    }
+
     /**
      * Sends a mouse motion event for a specific button at the specific location
+     *
+     * Motion is never a release: xterm reports a release as its own event without the
+     * motion bit, so this always emits a press-style report (`M` under SGR). Keeping
+     * that structural rather than a parameter is what stops a caller from re-creating
+     * issue #701, where a hover was reported to the application as a left-button release.
+     *
      * - Parameter buttonFlags: Button flags encoded in Cb mode.
      * - Parameter x: X coordinate for the event
      * - Parameter y: Y coordinate for the event
      */
     public func sendMotion (buttonFlags: Int, x: Int, y: Int, pixelX: Int, pixelY: Int)
     {
-        sendEvent(buttonFlags: buttonFlags+32, x: x, y: y, pixelX: pixelX, pixelY: pixelY)
+        sendEvent(buttonFlags: buttonFlags+32, x: x, y: y, pixelX: pixelX, pixelY: pixelY, release: false)
     }
     
     static var matchColorCache : [Int:Int] = [:]
