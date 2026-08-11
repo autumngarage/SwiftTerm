@@ -5478,6 +5478,23 @@ open class Terminal {
             data.append (0x80 | (UInt8 (rc & 0x3f)))
         }
     }
+
+    /// X10 carries each value in one byte after applying a protocol offset.
+    /// Clamp in integer space first: converting an out-of-range coordinate to
+    /// UInt8 before clamping traps instead of saturating.
+    private func encodeX10Byte (_ value: Int, offset: Int) -> UInt8
+    {
+        let maximumValue = Int(UInt8.max) - offset
+        let boundedValue = min(max(value, 0), maximumValue)
+        return UInt8(boundedValue + offset)
+    }
+
+    /// Mouse hit-testing is zero-based; SGR coordinates are one-based.
+    private func oneBasedMouseCoordinate (_ coordinate: Int) -> Int
+    {
+        guard coordinate > 0 else { return 1 }
+        return coordinate == Int.max ? Int.max : coordinate + 1
+    }
     
     /**
      * Encodes the button action in the format expected by the client
@@ -5506,6 +5523,10 @@ open class Terminal {
                 value = 64
             case 5:
                 value = 65
+            case 6:
+                value = 66
+            case 7:
+                value = 67
             default:
                 value = 0
             }
@@ -5547,14 +5568,18 @@ open class Terminal {
         defer { isSendingMouseEvent = false }
         switch mouseProtocol {
         case .x10:
-            sendResponse(cc.CSI, "M", [UInt8(buttonFlags+32), min (UInt8(255), UInt8(32 + x+1)), min (UInt8(255), UInt8(32+y+1))])
+            sendResponse(cc.CSI, "M", [
+                encodeX10Byte(buttonFlags, offset: 32),
+                encodeX10Byte(x, offset: 33),
+                encodeX10Byte(y, offset: 33),
+            ])
         case .sgr:
-            sendResponse(cc.CSI, "<\(sgrButton (buttonFlags, release: release));\(x+1);\(y+1)\(release ? "m" : "M")")
+            sendResponse(cc.CSI, "<\(sgrButton (buttonFlags, release: release));\(oneBasedMouseCoordinate(x));\(oneBasedMouseCoordinate(y))\(release ? "m" : "M")")
         case .sgrPixel:
-            sendResponse(cc.CSI, "<\(sgrButton (buttonFlags, release: release));\(pixelX);\(pixelY)\(release ? "m" : "M")")
+            sendResponse(cc.CSI, "<\(sgrButton (buttonFlags, release: release));\(oneBasedMouseCoordinate(pixelX));\(oneBasedMouseCoordinate(pixelY))\(release ? "m" : "M")")
 
         case .urxvt:
-            sendResponse(cc.CSI, "\(buttonFlags+32);\(x+1);\(y+1)M");
+            sendResponse(cc.CSI, "\(buttonFlags+32);\(oneBasedMouseCoordinate(x));\(oneBasedMouseCoordinate(y))M");
         case .utf8:
             var buffer: [UInt8] = [UInt8 (ascii: "M")]
             encodeMouseUtf(data: &buffer, ch: buttonFlags+32)

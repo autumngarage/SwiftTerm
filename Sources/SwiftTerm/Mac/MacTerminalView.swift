@@ -1404,16 +1404,125 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
     }
     
+    /// Fractional trackpad motion, in points, carried across events until it
+    /// reaches one terminal cell. Wheel routing has one invariant: negotiated
+    /// mouse reporting wins, then alternate-screen arrow fallback, then local
+    /// normal-buffer scrollback.
+    private var verticalScrollAccumulator: CGFloat = 0
+    private var horizontalScrollAccumulator: CGFloat = 0
+
     public override func scrollWheel(with event: NSEvent) {
-        if event.deltaY == 0 {
+        guard event.scrollingDeltaX.isFinite,
+              event.scrollingDeltaY.isFinite,
+              event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0,
+              let cellDimension,
+              cellDimension.width > 0,
+              cellDimension.height > 0 else {
             return
         }
-        let velocity = calcScrollingVelocity(delta: Int (abs (event.deltaY)))
-        if event.deltaY > 0 {
-            scrollUp (lines: velocity)
+
+        // One AppKit event must not expand into unbounded main-thread work.
+        // A visible terminal screen is the domain limit; 20 preserves the
+        // previous high-velocity behavior for unusually short terminals.
+        let lineLimit = max(terminal.rows, 20)
+        let verticalLines: Int
+        let horizontalLines: Int
+        if event.hasPreciseScrollingDeltas {
+            verticalLines = Self.preciseScrollLines(
+                delta: event.scrollingDeltaY,
+                cellSize: cellDimension.height,
+                accumulator: &verticalScrollAccumulator,
+                limit: lineLimit
+            )
+            horizontalLines = Self.preciseScrollLines(
+                delta: event.scrollingDeltaX,
+                cellSize: cellDimension.width,
+                accumulator: &horizontalScrollAccumulator,
+                limit: lineLimit
+            )
         } else {
-            scrollDown(lines: velocity)
+            verticalScrollAccumulator = 0
+            horizontalScrollAccumulator = 0
+            verticalLines = Self.nonPreciseScrollLines(for: event.scrollingDeltaY, limit: lineLimit)
+            horizontalLines = Self.nonPreciseScrollLines(for: event.scrollingDeltaX, limit: lineLimit)
         }
+
+        guard verticalLines != 0 || horizontalLines != 0 else { return }
+
+        if allowMouseReporting && terminal.mouseMode != .off {
+            let hit = calculateMouseHit(with: event)
+            let displayBuffer = terminal.displayBuffer
+            let screenRow = max(0, min(displayBuffer.rows - 1, hit.grid.row - displayBuffer.yDisp))
+            let flags = event.modifierFlags
+            // Xterm numbers wheel up/down as buttons 4/5 and right/left as
+            // buttons 6/7. Positive AppKit X deltas mean leftward motion.
+            for (lines, positiveButton, negativeButton) in [
+                (verticalLines, 4, 5),
+                (horizontalLines, 7, 6),
+            ] where lines != 0 {
+                let buttonFlags = terminal.encodeButton(
+                    button: lines > 0 ? positiveButton : negativeButton,
+                    release: false,
+                    shift: flags.contains(.shift),
+                    meta: flags.contains(.option),
+                    control: flags.contains(.control)
+                )
+                for _ in 0..<abs(lines) {
+                    terminal.sendEvent(
+                        buttonFlags: buttonFlags,
+                        x: hit.grid.col,
+                        y: screenRow,
+                        pixelX: hit.pixels.col,
+                        pixelY: hit.pixels.row,
+                        release: false
+                    )
+                }
+            }
+        } else if terminal.isDisplayBufferAlternate {
+            for _ in 0..<abs(verticalLines) {
+                if verticalLines > 0 {
+                    sendKeyUp()
+                } else {
+                    sendKeyDown()
+                }
+            }
+            for _ in 0..<abs(horizontalLines) {
+                if horizontalLines > 0 {
+                    sendKeyLeft()
+                } else {
+                    sendKeyRight()
+                }
+            }
+        } else if verticalLines > 0 {
+            scrollUp(lines: verticalLines)
+        } else if verticalLines < 0 {
+            scrollDown(lines: abs(verticalLines))
+        }
+    }
+
+    private static func preciseScrollLines(
+        delta: CGFloat,
+        cellSize: CGFloat,
+        accumulator: inout CGFloat,
+        limit: Int
+    ) -> Int {
+        accumulator += delta
+        guard accumulator.isFinite else {
+            accumulator = 0
+            return delta > 0 ? limit : -limit
+        }
+
+        let completeLines = (accumulator / cellSize).rounded(.towardZero)
+        accumulator -= completeLines * cellSize
+        return Int(min(max(completeLines, -CGFloat(limit)), CGFloat(limit)))
+    }
+
+    private static func nonPreciseScrollLines(for delta: CGFloat, limit: Int) -> Int {
+        guard delta != 0 else { return 0 }
+        let bounded = min(max(delta.rounded(), -CGFloat(limit)), CGFloat(limit))
+        let rounded = Int(bounded)
+        // A physical wheel notch must always move at least one cell.
+        return rounded != 0 ? rounded : (delta > 0 ? 1 : -1)
     }
     
     private func calcScrollingVelocity (delta: Int) -> Int
