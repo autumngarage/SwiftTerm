@@ -24,6 +24,164 @@ class SelectionService: CustomDebugStringConvertible {
         end = Position(col: 0, row: 0)
         pivot = Position(col: 0, row: 0)
         hasSelectionRange = false
+        terminal.register(selection: self)
+    }
+
+    private func orderedSelectedRows() -> (
+        first: Position,
+        last: Position,
+        top: Int,
+        bottom: Int
+    ) {
+        let (first, last) = Position.compare(start, end) == .before
+            ? (start, end)
+            : (end, start)
+        // Selection ends are exclusive. `(0, row)` contributes no cells from
+        // `row` when the range began on an earlier row.
+        let bottom = last.col == 0 && last.row > first.row
+            ? last.row - 1
+            : last.row
+        return (first, last, first.row, bottom)
+    }
+
+    /**
+     * Translates selection anchors when terminal rows move in place.
+     *
+     * A selection is dropped when any selected row leaves the moved region or
+     * when the range crosses the region boundary. In either case, the original
+     * text no longer exists as one contiguous selection.
+     */
+    func adjustForInPlaceScroll(top: Int, bottom: Int, lines: Int)
+    {
+        guard active, lines != 0 else { return }
+
+        let selected = orderedSelectedRows()
+        guard selected.top <= bottom, selected.bottom >= top else { return }
+        guard selected.top >= top, selected.bottom <= bottom else {
+            selectNone()
+            return
+        }
+
+        let translatedTop = selected.top - lines
+        let translatedBottom = selected.bottom - lines
+        guard translatedTop >= top, translatedBottom <= bottom else {
+            selectNone()
+            return
+        }
+
+        func translated(_ position: Position) -> Position {
+            let isExclusiveEndBoundary = position == selected.last
+                && selected.last.col == 0
+                && selected.last.row == selected.bottom + 1
+            guard (position.row >= selected.top && position.row <= selected.bottom)
+                    || isExclusiveEndBoundary else {
+                return position
+            }
+            let newRow = position.row - lines
+            return Position(col: position.col, row: newRow)
+        }
+
+        let newStart = translated(start)
+        let newEnd = translated(end)
+
+        let newPivot: Position?
+        if let pivot, pivot == start || pivot == end {
+            newPivot = translated(pivot)
+        } else {
+            newPivot = pivot
+        }
+
+        start = newStart
+        end = newEnd
+        pivot = newPivot
+        terminal.notifySelectionChanged()
+    }
+
+    /**
+     * Invalidates a selection that overlaps a column-restricted row shift.
+     * A row-based range cannot represent only some of its cells moving.
+     */
+    func invalidateForColumnRestrictedScroll(top: Int, bottom: Int, left: Int, right: Int)
+    {
+        guard active else { return }
+
+        let selected = orderedSelectedRows()
+        let first = selected.first
+        let last = selected.last
+        guard selected.top <= bottom, selected.bottom >= top else { return }
+
+        if first.row == last.row, last.col <= left || first.col > right {
+            return
+        }
+        selectNone()
+    }
+
+    /**
+     * Translates a single-row selection when cells move horizontally.
+     *
+     * Selection ends are exclusive. A selection entirely before or after the
+     * changed columns is unaffected. Content wholly inside the surviving
+     * source range moves with its cells; a range that crosses the insertion or
+     * deletion boundary, or whose cells are evicted, can no longer represent
+     * the same contiguous text and is cleared.
+     */
+    func adjustForInPlaceCellShift(
+        top: Int,
+        bottom: Int,
+        left: Int,
+        right: Int,
+        columns: Int
+    ) {
+        guard active, columns != 0, left <= right else { return }
+
+        let selected = orderedSelectedRows()
+        let first = selected.first
+        let last = selected.last
+        guard selected.top <= bottom, selected.bottom >= top else { return }
+
+        // A horizontal mutation on one of several selected rows cannot be
+        // represented by translating only the two range endpoints.
+        guard first.row == last.row,
+              first.row >= top,
+              first.row <= bottom else {
+            selectNone()
+            return
+        }
+
+        // `last.col` is exclusive; ending exactly at `left` does not overlap.
+        guard last.col > left, first.col <= right else { return }
+
+        let width = right - left + 1
+        let distance = min(abs(columns), width)
+        let delta: Int
+        if columns > 0 {
+            let sourceEnd = right - distance + 1
+            guard first.col >= left, last.col <= sourceEnd else {
+                selectNone()
+                return
+            }
+            delta = distance
+        } else {
+            let sourceStart = left + distance
+            guard first.col >= sourceStart, last.col <= right + 1 else {
+                selectNone()
+                return
+            }
+            delta = -distance
+        }
+
+        let originalStart = start
+        let originalEnd = end
+        func translated(_ position: Position) -> Position {
+            Position(col: position.col + delta, row: position.row)
+        }
+
+        start = translated(originalStart)
+        end = translated(originalEnd)
+        if let pivot, pivot == originalStart || pivot == originalEnd {
+            self.pivot = translated(pivot)
+        }
+        terminal.notifySelectionChanged()
     }
     
     /**
@@ -38,7 +196,7 @@ class SelectionService: CustomDebugStringConvertible {
         set(newValue) {
             if _active != newValue {
                 _active = newValue
-                terminal.tdel?.selectionChanged (source: terminal)
+                terminal.notifySelectionChanged()
             }
             if active == false {
                 pivot = nil
@@ -49,7 +207,7 @@ class SelectionService: CustomDebugStringConvertible {
     // This avoids the user visible cache
     func setActiveAndNotify () {
         _active = true
-        terminal.tdel?.selectionChanged (source: terminal)
+        terminal.notifySelectionChanged()
     }
 
     /**

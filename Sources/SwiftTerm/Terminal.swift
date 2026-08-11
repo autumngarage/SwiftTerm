@@ -320,6 +320,143 @@ open class Terminal {
     /// Terminal configuration options.
     /// Setup(isReset:) method should be called to apply changes
     public var options: TerminalOptions
+
+    // Views own selection services. The terminal keeps weak registrations so
+    // structural row moves can keep their buffer-relative anchors honest.
+    private struct WeakSelection {
+        weak var value: SelectionService?
+    }
+    private var selections: [WeakSelection] = []
+
+    private enum SelectionMutation {
+        case rows(top: Int, bottom: Int, lines: Int)
+        case columns(top: Int, bottom: Int, left: Int, right: Int, columns: Int)
+        case restrictedColumns(top: Int, bottom: Int, left: Int, right: Int)
+        case clear
+    }
+    private var deferredSelectionMutations: [SelectionMutation] = []
+    private var suppressSelectionNotifications = false
+    private var hasSuppressedSelectionNotification = false
+    private var isApplyingStructuralSelectionMutation = false
+
+    /// True only while the delegate is being notified that terminal storage
+    /// moved or invalidated selection anchors. Hosts can use this to avoid
+    /// treating coordinate maintenance as a fresh user selection gesture.
+    public private(set) var isSelectionChangeStructural = false
+
+    func register(selection: SelectionService)
+    {
+        selections.removeAll { $0.value == nil }
+        guard !selections.contains(where: { $0.value === selection }) else { return }
+        selections.append(WeakSelection(value: selection))
+    }
+
+    func selectionsAdjustForInPlaceScroll(top: Int, bottom: Int, lines: Int)
+    {
+        applyOrDeferSelectionMutation(.rows(top: top, bottom: bottom, lines: lines))
+    }
+
+    func selectionsAdjustForInPlaceCellShift(
+        top: Int,
+        bottom: Int,
+        left: Int,
+        right: Int,
+        columns: Int
+    ) {
+        applyOrDeferSelectionMutation(
+            .columns(top: top, bottom: bottom, left: left, right: right, columns: columns)
+        )
+    }
+
+    func selectionsInvalidateForColumnRestrictedScroll(
+        top: Int,
+        bottom: Int,
+        left: Int,
+        right: Int
+    ) {
+        applyOrDeferSelectionMutation(
+            .restrictedColumns(top: top, bottom: bottom, left: left, right: right)
+        )
+    }
+
+    func selectionsClear()
+    {
+        applyOrDeferSelectionMutation(.clear)
+    }
+
+    private func applyOrDeferSelectionMutation(_ mutation: SelectionMutation)
+    {
+        if synchronizedOutputBuffer != nil {
+            deferredSelectionMutations.append(mutation)
+            return
+        }
+        applySelectionMutation(mutation)
+    }
+
+    private func applySelectionMutation(_ mutation: SelectionMutation)
+    {
+        let wasApplyingStructuralMutation = isApplyingStructuralSelectionMutation
+        isApplyingStructuralSelectionMutation = true
+        defer {
+            isApplyingStructuralSelectionMutation = wasApplyingStructuralMutation
+        }
+
+        selections.removeAll { $0.value == nil }
+        for entry in selections {
+            guard let selection = entry.value else { continue }
+            switch mutation {
+            case .rows(let top, let bottom, let lines):
+                selection.adjustForInPlaceScroll(top: top, bottom: bottom, lines: lines)
+            case .columns(let top, let bottom, let left, let right, let columns):
+                selection.adjustForInPlaceCellShift(
+                    top: top,
+                    bottom: bottom,
+                    left: left,
+                    right: right,
+                    columns: columns
+                )
+            case .restrictedColumns(let top, let bottom, let left, let right):
+                selection.invalidateForColumnRestrictedScroll(
+                    top: top,
+                    bottom: bottom,
+                    left: left,
+                    right: right
+                )
+            case .clear:
+                selection.selectNone()
+            }
+        }
+    }
+
+    func notifySelectionChanged()
+    {
+        if suppressSelectionNotifications {
+            hasSuppressedSelectionNotification = true
+            return
+        }
+        let previousValue = isSelectionChangeStructural
+        isSelectionChangeStructural = isApplyingStructuralSelectionMutation
+        defer { isSelectionChangeStructural = previousValue }
+        tdel?.selectionChanged(source: self)
+    }
+
+    private func applyDeferredSelectionMutations(_ mutations: [SelectionMutation])
+    {
+        guard !mutations.isEmpty else { return }
+        suppressSelectionNotifications = true
+        hasSuppressedSelectionNotification = false
+        for mutation in mutations {
+            applySelectionMutation(mutation)
+        }
+        suppressSelectionNotifications = false
+        if hasSuppressedSelectionNotification {
+            hasSuppressedSelectionNotification = false
+            let previousValue = isSelectionChangeStructural
+            isSelectionChangeStructural = true
+            defer { isSelectionChangeStructural = previousValue }
+            tdel?.selectionChanged(source: self)
+        }
+    }
     
     // The current buffers
     var normalBuffer, altBuffer: Buffer
@@ -665,8 +802,8 @@ open class Terminal {
         parser.terminal = self
         configureParser (parser)
         
-        normalBuffer.scroll = { [weak self] wrapped in self?.scroll(isWrapped: wrapped) }
-        altBuffer.scroll = { [weak self] wrapped in self?.scroll(isWrapped: wrapped) }
+        configureCallbacks(for: normalBuffer)
+        configureCallbacks(for: altBuffer)
 
         setupTabStops()
 
@@ -756,16 +893,33 @@ open class Terminal {
     
     public func resetNormalBuffer() {
         normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: options.scrollback)
-        normalBuffer.scroll = scroll(isWrapped:)
+        configureCallbacks(for: normalBuffer)
 
         normalBuffer.fillViewportRows()
         normalBuffer.setupTabStops(tabStopWidth: tabStopWidth)
+    }
+
+    private func configureCallbacks(for buffer: Buffer)
+    {
+        buffer.scroll = { [weak self] wrapped in
+            self?.scroll(isWrapped: wrapped)
+        }
+        buffer.inPlaceCellShift = { [weak self] row, left, right, columns in
+            self?.selectionsAdjustForInPlaceCellShift(
+                top: row,
+                bottom: row,
+                left: left,
+                right: right,
+                columns: columns
+            )
+        }
     }
     
     private func activateNormalBuffer(clearAlt: Bool) {
         if buffer === normalBuffer {
             return
         }
+        selectionsClear()
         normalBuffer.x = altBuffer.x
         normalBuffer.y = altBuffer.y
         
@@ -784,6 +938,7 @@ open class Terminal {
         if buffer === altBuffer {
             return
         }
+        selectionsClear()
         altBuffer.x = normalBuffer.x
         altBuffer.y = normalBuffer.y
         
@@ -1972,8 +2127,26 @@ open class Terminal {
         }
         let cd = CharData (attribute: eraseAttr ())
         let buffer = self.buffer
-        
-        buffer.lines [buffer.y + buffer.yBase].insertCells (pos: buffer.x, n: pars.count > 0 ? max (pars [0], 1) : 1, rightMargin: marginMode ? buffer.marginRight : cols-1, fillData: cd)
+        let rightMargin = marginMode ? buffer.marginRight : cols - 1
+        let requested = pars.count > 0 ? max(pars[0], 1) : 1
+        let inserted = min(requested, max(0, rightMargin - buffer.x + 1))
+
+        buffer.lines [buffer.y + buffer.yBase].insertCells (
+            pos: buffer.x,
+            n: requested,
+            rightMargin: rightMargin,
+            fillData: cd
+        )
+        if inserted > 0 {
+            let row = buffer.y + buffer.yBase
+            selectionsAdjustForInPlaceCellShift(
+                top: row,
+                bottom: row,
+                left: buffer.x,
+                right: rightMargin,
+                columns: inserted
+            )
+        }
 
         updateRange (buffer.y)
     }
@@ -2281,10 +2454,20 @@ open class Terminal {
             // Clear scrollback (everything not in viewport)
             let scrollBackSize = buffer.lines.count - rows
             if scrollBackSize > 0 {
+                let previousLineCount = buffer.lines.count
+                for row in 0..<scrollBackSize {
+                    buffer.clearImagesFromLine(at: row)
+                }
                 buffer.lines.trimStart (count: scrollBackSize)
                 buffer.linesTop = 0
                 buffer.yBase = max (buffer.yBase - scrollBackSize, 0)
                 buffer.yDisp = max (buffer.yDisp - scrollBackSize, 0)
+                selectionsAdjustForInPlaceScroll(
+                    top: 0,
+                    bottom: previousLineCount - 1,
+                    lines: scrollBackSize
+                )
+                reconcileKittyPlacementsAfterRowMutation()
             }
             break;
         default:
@@ -2338,6 +2521,9 @@ open class Terminal {
             if buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight {
                 let columnCount = buffer.marginRight-buffer.marginLeft+1
                 let rowCount = buffer.scrollBottom-buffer.scrollTop
+                for affectedRow in row...(row + rowCount) {
+                    buffer.clearImagesFromLine(at: affectedRow)
+                }
                 for _ in 0..<p {
                     for i in (0..<rowCount).reversed() {
                         let src = buffer.lines [row+i]
@@ -2349,18 +2535,34 @@ open class Terminal {
                     let last = buffer.lines [row]
                     last.fill (with: CharData (attribute: ea), atCol: buffer.marginLeft, len: columnCount)
                 }
+
+                selectionsInvalidateForColumnRestrictedScroll(
+                    top: row,
+                    bottom: row + rowCount,
+                    left: buffer.marginLeft,
+                    right: buffer.marginRight
+                )
             }
         } else {
+            let inserted = p
             for _ in 0..<p {
                 p -= 1
                 // test: echo -e '\e[44m\e[1L\e[0m'
                 // blankLine(true) - xterm/linux behavior
+                buffer.clearImagesFromLine(at: scrollBottomAbsolute - 1)
                 buffer.lines.splice (start: scrollBottomAbsolute - 1, deleteCount: 1, items: [],
                                      change: { line in updateRange (line) })
                 let newLine = buffer.getBlankLine (attribute: ea)
                 buffer.lines.splice (start: row, deleteCount: 0, items: [newLine], change: { line in updateRange (line) })
             }
+
+            selectionsAdjustForInPlaceScroll(
+                top: row,
+                bottom: scrollBottomAbsolute - 1,
+                lines: -inserted
+            )
         }
+        reconcileKittyPlacementsAfterRowMutation()
         // this.maxRange();
         updateRange (startLine: buffer.y, endLine: buffer.scrollBottom)
     }
@@ -2633,6 +2835,17 @@ open class Terminal {
                 let line = buffer.lines [row+buffer.yBase]
                 line.insertCells(pos: buffer.x, n: n, rightMargin: marginMode ? buffer.marginRight : cols-1, fillData: buffer.getNullCell())
                 line.isWrapped = false
+            }
+            let rightMargin = marginMode ? buffer.marginRight : cols - 1
+            let inserted = min(n, max(0, rightMargin - buffer.x + 1))
+            if inserted > 0 {
+                selectionsAdjustForInPlaceCellShift(
+                    top: buffer.yBase + buffer.scrollTop,
+                    bottom: buffer.yBase + buffer.scrollBottom,
+                    left: buffer.x,
+                    right: rightMargin,
+                    columns: inserted
+                )
             }
             updateRange (startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
             return
@@ -4535,20 +4748,52 @@ open class Terminal {
         let p = min (max (pars.count == 0 ? 1 : pars [0], 1), rows)
         let da = CharData.defaultAttr
 
-        let row = buffer.scrollTop + buffer.yBase
-
-        let columnCount = buffer.marginRight-buffer.marginLeft+1
-        let rowCount = buffer.scrollBottom-buffer.scrollTop
-        for _ in 0..<p {
-            for i in (0..<rowCount).reversed() {
-                let src = buffer.lines [row+i]
-                let dst = buffer.lines [row+i+1]
-                
-                dst.copyFrom(src, srcCol: buffer.marginLeft, dstCol: buffer.marginLeft, len: columnCount)
+        if marginMode {
+            let row = buffer.scrollTop + buffer.yBase
+            let columnCount = buffer.marginRight-buffer.marginLeft+1
+            let rowCount = buffer.scrollBottom-buffer.scrollTop
+            for affectedRow in row...(row + rowCount) {
+                buffer.clearImagesFromLine(at: affectedRow)
             }
-            let last = buffer.lines [row]
-            last.fill (with: CharData (attribute: da), atCol: buffer.marginLeft, len: columnCount)
+            for _ in 0..<p {
+                for i in (0..<rowCount).reversed() {
+                    let src = buffer.lines [row+i]
+                    let dst = buffer.lines [row+i+1]
+
+                    dst.copyFrom(src, srcCol: buffer.marginLeft, dstCol: buffer.marginLeft, len: columnCount)
+                }
+                let last = buffer.lines [row]
+                last.fill (with: CharData (attribute: da), atCol: buffer.marginLeft, len: columnCount)
+            }
+
+            selectionsInvalidateForColumnRestrictedScroll(
+                top: row,
+                bottom: row + rowCount,
+                left: buffer.marginLeft,
+                right: buffer.marginRight
+            )
+        } else {
+            for _ in 0..<p {
+                buffer.clearImagesFromLine(at: buffer.yBase + buffer.scrollBottom)
+                buffer.lines.splice(
+                    start: buffer.yBase + buffer.scrollBottom,
+                    deleteCount: 1,
+                    items: [],
+                    change: { line in updateRange(line) }
+                )
+                buffer.lines.splice(
+                    start: buffer.yBase + buffer.scrollTop,
+                    deleteCount: 0,
+                    items: [buffer.getBlankLine(attribute: da)],
+                    change: { line in updateRange(line) }
+                )
+            }
+
+            let top = buffer.yBase + buffer.scrollTop
+            let bottom = buffer.yBase + buffer.scrollBottom
+            selectionsAdjustForInPlaceScroll(top: top, bottom: bottom, lines: -p)
         }
+        reconcileKittyPlacementsAfterRowMutation()
         // this.maxRange();
         updateRange (startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
     }
@@ -4566,6 +4811,9 @@ open class Terminal {
 
             let columnCount = buffer.marginRight-buffer.marginLeft+1
             let rowCount = buffer.scrollBottom-buffer.scrollTop
+            for affectedRow in row...(row + rowCount) {
+                buffer.clearImagesFromLine(at: affectedRow)
+            }
             for _ in 0..<p {
                 for i in 0..<(rowCount) {
                     let src = buffer.lines [row+i+1]
@@ -4576,15 +4824,28 @@ open class Terminal {
                 let last = buffer.lines [row+rowCount]
                 last.fill (with: CharData (attribute: da), atCol: buffer.marginLeft, len: columnCount)
             }
+
+            selectionsInvalidateForColumnRestrictedScroll(
+                top: row,
+                bottom: row + rowCount,
+                left: buffer.marginLeft,
+                right: buffer.marginRight
+            )
         } else {
             for _ in 0..<p {
+                buffer.clearImagesFromLine(at: buffer.yBase + buffer.scrollTop)
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollTop, deleteCount: 1,
                                      items: [], change: { line in updateRange (line)})
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollBottom, deleteCount: 0,
                                      items: [buffer.getBlankLine (attribute: da)],
                                      change: { line in updateRange (line) })
             }
+
+            let top = buffer.yBase + buffer.scrollTop
+            let bottom = buffer.yBase + buffer.scrollBottom
+            selectionsAdjustForInPlaceScroll(top: top, bottom: bottom, lines: p)
         }
+        reconcileKittyPlacementsAfterRowMutation()
         // this.maxRange();
         updateRange (startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
     }
@@ -4610,8 +4871,20 @@ open class Terminal {
         if buffer.x == buffer.cols {
             return
         }
+        let rightMargin = marginMode ? buffer.marginRight : cols - 1
         buffer.lines [buffer.y + buffer.yBase].deleteCells (
-            pos: buffer.x, n: p, rightMargin: marginMode ? buffer.marginRight : cols-1, fillData: CharData (attribute: eraseAttr ()))
+            pos: buffer.x, n: p, rightMargin: rightMargin, fillData: CharData (attribute: eraseAttr ()))
+        let deleted = min(p, max(0, rightMargin - buffer.x + 1))
+        if deleted > 0 {
+            let row = buffer.y + buffer.yBase
+            selectionsAdjustForInPlaceCellShift(
+                top: row,
+                bottom: row,
+                left: buffer.x,
+                right: rightMargin,
+                columns: -deleted
+            )
+        }
         
         updateRange (buffer.y)
     }
@@ -4636,6 +4909,9 @@ open class Terminal {
             if buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight {
                 let columnCount = buffer.marginRight-buffer.marginLeft+1
                 let rowCount = buffer.scrollBottom-buffer.scrollTop
+                for affectedRow in row...(row + rowCount) {
+                    buffer.clearImagesFromLine(at: affectedRow)
+                }
                 for _ in 0..<p {
                     for i in 0..<(rowCount) {
                         let src = buffer.lines [row+i+1]
@@ -4647,19 +4923,30 @@ open class Terminal {
                     let last = buffer.lines [row+rowCount]
                     last.fill (with: CharData (attribute: ea), atCol: buffer.marginLeft, len: columnCount)
                 }
+
+                selectionsInvalidateForColumnRestrictedScroll(
+                    top: row,
+                    bottom: row + rowCount,
+                    left: buffer.marginLeft,
+                    right: buffer.marginRight
+                )
             }
         } else {
             if buffer.y >= buffer.scrollTop && buffer.y <= buffer.scrollBottom {
                 for _ in 0..<p {
                     // test: echo -e '\e[44m\e[1M\e[0m'
                     // blankLine(true) - xterm/linux behavior
+                    buffer.clearImagesFromLine(at: row)
                     buffer.lines.splice (start: row, deleteCount: 1, items: [], change: { line in updateRange (line)})
                     buffer.lines.splice (start: j, deleteCount: 0,
                                          items: [buffer.getBlankLine (attribute: ea)],
                                          change: { line in updateRange (line)})
                 }
+
+                selectionsAdjustForInPlaceScroll(top: row, bottom: j, lines: p)
             }
         }
+        reconcileKittyPlacementsAfterRowMutation()
         
         // this.maxRange();
         updateRange (startLine: buffer.y, endLine: buffer.scrollBottom)
@@ -4696,6 +4983,17 @@ open class Terminal {
             let line = buffer.lines [buffer.yBase + y]
             line.deleteCells(pos: buffer.x, n: p, rightMargin: marginMode ? buffer.marginRight : cols-1, fillData: buffer.getNullCell(attribute: eraseAttr()))
             line.isWrapped = false
+        }
+        let rightMargin = marginMode ? buffer.marginRight : cols - 1
+        let deleted = min(p, max(0, rightMargin - buffer.x + 1))
+        if deleted > 0 {
+            selectionsAdjustForInPlaceCellShift(
+                top: buffer.yBase + buffer.scrollTop,
+                bottom: buffer.yBase + buffer.scrollBottom,
+                left: buffer.x,
+                right: rightMargin,
+                columns: -deleted
+            )
         }
         updateRange (startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
     }
@@ -5030,6 +5328,13 @@ open class Terminal {
             }
             //line.isWrapped = false
         }
+        selectionsAdjustForInPlaceCellShift(
+            top: buffer.yBase + buffer.scrollTop,
+            bottom: buffer.yBase + buffer.scrollBottom,
+            left: at,
+            right: marginMode ? buffer.marginRight : cols - 1,
+            columns: back ? 1 : -1
+        )
         updateRange (buffer.scrollTop)
         updateRange (buffer.scrollBottom)
     }
@@ -5118,9 +5423,24 @@ open class Terminal {
             bottomLine.isWrapped = false
             buffer.clearImagesFromLine(at: bottomRow)
             bottomLine.renderMode = .single
+
+            selectionsInvalidateForColumnRestrictedScroll(
+                top: topRow,
+                bottom: bottomRow,
+                left: bMarginLeft,
+                right: bMarginRight
+            )
         } else if scrollTop == 0 {
             // Determine whether the buffer is going to be trimmed after insertion.
             let willBufferBeTrimmed = lines.isFull
+            let previousLineCount = lines.count
+
+            if willBufferBeTrimmed {
+                // Both recycle and middle insertion discard the oldest logical
+                // row. Remove its image attachments before the circular list
+                // reuses or trims that storage.
+                buffer.clearImagesFromLine(at: 0)
+            }
 
             // Insert the line using the fastest method
             if bottomRow == lines.count - 1 {
@@ -5142,10 +5462,30 @@ open class Terminal {
                 if !userScrolling {
                     buffer.yDisp += 1
                 }
+                if bottomRow < previousLineCount - 1 {
+                    // Inserting a blank below a partial region shifts only the
+                    // fixed rows below that insertion in the growing list.
+                    selectionsAdjustForInPlaceScroll(
+                        top: bottomRow + 1,
+                        bottom: previousLineCount,
+                        lines: -1
+                    )
+                }
             } else {
                 if hasScrollback {
                     buffer.linesTop += 1
                 }
+
+                // A full-screen scroll shifts every surviving row. With a
+                // shorter top-anchored region, insertion plus circular trimming
+                // leaves rows below the region at their original indices.
+                selectionsAdjustForInPlaceScroll(
+                    top: 0,
+                    bottom: bottomRow == previousLineCount - 1
+                        ? previousLineCount - 1
+                        : bottomRow,
+                    lines: 1
+                )
 
                 // When the buffer is full and the user has scrolled up, keep the text
                 // stable unless ydisp is right at the top
@@ -5165,12 +5505,19 @@ open class Terminal {
             }
 
             let scrollRegionHeight = bottomRow - topRow + 1 /*as it's zero-based*/
+            buffer.clearImagesFromLine(at: topRow)
             if scrollRegionHeight > 1 {
                 if !lines.shiftElements (start: topRow + 1, count: scrollRegionHeight - 1, offset: -1) {
                     print ("Assertion on scroll, state was: bottomRow=\(bottomRow) topRow=\(topRow) yDisp=\(buffer.yDisp) linesTop=\(buffer.linesTop) isAlternate=\(isCurrentBufferAlternate)")
                 }
             }
             lines [bottomRow] = BufferLine (from: newLine)
+
+            selectionsAdjustForInPlaceScroll(
+                top: topRow,
+                bottom: bottomRow,
+                lines: 1
+            )
         }
 
         // Move the viewport to the bottom of the buffer unless the user is
@@ -5188,9 +5535,7 @@ open class Terminal {
             updateRange(startLine: scrollTop, endLine: scrollBottom)
         }
 
-        if buffer.hasAnyImages {
-            updateKittyRelativePlacementsForCurrentBuffer()
-        }
+        reconcileKittyPlacementsAfterRowMutation()
 
         /**
          * This event is emitted whenever the terminal is scrolled.
@@ -5317,7 +5662,28 @@ open class Terminal {
     public func changeHistorySize (_ newScrollback: Int?)
     {
         // Only the normal buffer has scrollback, the alt buffer should never have scrollback
+        let previousLineCount = normalBuffer.lines.count
+        let requestedScrollback = max(newScrollback ?? 0, 0)
+        let boundedScrollback = min(requestedScrollback, Int(Int32.max) - normalBuffer.rows)
+        let targetLineCount = normalBuffer.rows + boundedScrollback
+        let linesToTrim = max(0, previousLineCount - targetLineCount)
+        if linesToTrim > 0 {
+            for row in 0..<linesToTrim {
+                normalBuffer.clearImagesFromLine(at: row)
+            }
+        }
         normalBuffer.changeHistorySize(newScrollback)
+        let trimmedLineCount = previousLineCount - normalBuffer.lines.count
+        if trimmedLineCount > 0 {
+            if buffer === normalBuffer {
+                selectionsAdjustForInPlaceScroll(
+                    top: 0,
+                    bottom: previousLineCount - 1,
+                    lines: trimmedLineCount
+                )
+            }
+            reconcileKittyPlacementsAfterRowMutation(in: normalBuffer)
+        }
         
         // Update the options to reflect the new scrollback size
         options.scrollback = newScrollback ?? 0
@@ -5336,6 +5702,7 @@ open class Terminal {
         let wasActive = synchronizedOutputActive
         if !synchronizedOutputActive {
             synchronizedOutputActive = true
+            deferredSelectionMutations.removeAll(keepingCapacity: true)
             synchronizedOutputBuffer = snapshotBuffer(buffer)
             synchronizedOutputBufferIsAlternate = isCurrentBufferAlternate
         } else if synchronizedOutputBuffer == nil {
@@ -5353,11 +5720,18 @@ open class Terminal {
         guard synchronizedOutputActive else {
             return
         }
+        let selectionMutations = deferredSelectionMutations
+        deferredSelectionMutations.removeAll(keepingCapacity: true)
         synchronizedOutputActive = false
         synchronizedOutputBuffer = nil
         synchronizedOutputBufferIsAlternate = false
         synchronizedOutputTimeoutItem?.cancel()
         synchronizedOutputTimeoutItem = nil
+
+        // Selection coordinates remain tied to the frozen display snapshot
+        // until it is released. Apply live-buffer mutations only now, so every
+        // notification and clipboard read observes one coherent buffer.
+        applyDeferredSelectionMutations(selectionMutations)
         refresh (startRow: 0, endRow: rows - 1)
         tdel?.synchronizedOutputChanged(source: self, active: false)
     }
@@ -5711,14 +6085,29 @@ open class Terminal {
                     topLine.isWrapped = false
                     buffer.clearImagesFromLine(at: topRow)
                     topLine.renderMode = .single
+
+                    selectionsInvalidateForColumnRestrictedScroll(
+                        top: topRow,
+                        bottom: bottomRow,
+                        left: buffer.marginLeft,
+                        right: buffer.marginRight
+                    )
                 } else {
                     // Full-width scrolling - use original shiftElements approach
                     let scrollRegionHeight = buffer.scrollBottom - buffer.scrollTop
+                    buffer.clearImagesFromLine(at: bottomRow)
                     if !buffer.lines.shiftElements (start: topRow, count: scrollRegionHeight, offset: 1) {
                         print ("Assertion on reverseIndex, state was: y=\(buffer.y) scrollTop=\(buffer.scrollTop)  yDisp=\(buffer.yDisp) linesTop=\(buffer.linesTop) isAlternate=\(isCurrentBufferAlternate)")
                     }
                     buffer.lines [topRow] = buffer.getBlankLine (attribute: eraseAttr ())
+
+                    selectionsAdjustForInPlaceScroll(
+                        top: topRow,
+                        bottom: bottomRow,
+                        lines: -1
+                    )
                 }
+                reconcileKittyPlacementsAfterRowMutation()
                 updateRange (startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
             }
         } else if buffer.y > 0 {

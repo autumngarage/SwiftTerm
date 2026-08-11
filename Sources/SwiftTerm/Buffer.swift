@@ -257,6 +257,9 @@ public final class Buffer {
     var scroll: (_ isWrapped: Bool)->() = { x in
         fatalError("This should be set after creating a buffer")
     }
+    var inPlaceCellShift: (_ row: Int, _ left: Int, _ right: Int, _ columns: Int) -> Void = {
+        _, _, _, _ in
+    }
     
     func setInsertMode(_ value: Bool) {
         self.insertMode = value
@@ -488,6 +491,10 @@ public final class Buffer {
             savedX = min (savedX, newCols - 1)
 
             scrollTop = 0
+        } else if newMaxLength < lines.maxLength {
+            // Empty alternate buffers are commonly resized before first use.
+            // They still must shed stale capacity because they have no scrollback.
+            lines.maxLength = newMaxLength
         }
         scrollBottom = newRows - 1
         if tabStops.count > newCols {
@@ -1204,6 +1211,11 @@ public final class Buffer {
             empty.attribute = curAttr
             // right shift cells according to the width
             bufferRow.insertCells (pos: _x, n: chWidth, rightMargin: marginMode ? _marginRight : _cols-1, fillData: empty)
+            let rightMargin = marginMode ? _marginRight : _cols - 1
+            let shiftedColumns = min(chWidth, max(0, rightMargin - _x + 1))
+            if shiftedColumns > 0 {
+                inPlaceCellShift(_y + _yBase, _x, rightMargin, shiftedColumns)
+            }
             // test last cell - since the last cell has only room for
             // a halfwidth char any fullwidth shifted there is lost
             // and will be set to eraseChar
