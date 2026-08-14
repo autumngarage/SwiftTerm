@@ -25,8 +25,16 @@ public protocol LocalProcessDelegate: AnyObject {
     /// This method is invoked when data has been received from the local process that should be send to the terminal for processing.
     func dataReceived (slice: ArraySlice<UInt8>)
 
+    /// Invoked after the PTY read stream reaches EOF and every preceding
+    /// `dataReceived` callback has returned.
+    func processOutputDrained (_ source: LocalProcess)
+
     /// This method should return the window size to report to the local process.
     func getWindowSize () -> winsize
+}
+
+public extension LocalProcessDelegate {
+    func processOutputDrained (_ source: LocalProcess) {}
 }
 
 /**
@@ -85,6 +93,8 @@ public class LocalProcess {
     var readQueue: DispatchQueue
     
     var io: DispatchIO?
+    private let outputDrainLock = NSLock()
+    private var outputDrainDelivered = false
     
     #if canImport(Subprocess)
     // Swift Subprocess related properties
@@ -177,10 +187,15 @@ public class LocalProcess {
     var totalRead = 0
     func childProcessRead (done: Bool, data: DispatchData?, errno: Int32) {
         guard let data else {
-            // Re-schedule the read on transient errors to keep the chain alive
-            if !done, running {
-                io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+            if done {
+                finishOutputDrain()
+                return
             }
+            // Re-schedule the read on transient errors to keep the chain alive
+            // Process exit can set `running` false before DispatchIO reaches
+            // EOF. Keep consuming this read stream until its own done flag so
+            // a transient empty callback cannot strand the final PTY bytes.
+            io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
             return
         }
         if debugIO {
@@ -189,11 +204,7 @@ public class LocalProcess {
         }
         
         if data.count == 0 {
-            childfd = -1
-            if running {
-                childStopped()
-                // delegate.processTerminated (self, exitCode: nil)
-            }
+            finishOutputDrain()
             return
         }
         var b: [UInt8] = Array.init(repeating: 0, count: data.count)
@@ -214,7 +225,28 @@ public class LocalProcess {
         dispatchQueue.sync {
             delegate?.dataReceived(slice: b[...])
         }
-        io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+        if done {
+            finishOutputDrain()
+        } else {
+            io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+        }
+    }
+
+    /// Deliver the drain boundary on the same queue as process output. The
+    /// synchronous hop establishes that every data callback has completed
+    /// before clients finalize output-dependent state.
+    private func finishOutputDrain() {
+        childfd = -1
+        dispatchQueue.sync { [self] in
+            let shouldDeliver = outputDrainLock.withLock { () -> Bool in
+                guard !outputDrainDelivered else { return false }
+                outputDrainDelivered = true
+                return true
+            }
+            if shouldDeliver {
+                delegate?.processOutputDrained(self)
+            }
+        }
     }
 
 #if os(macOS)
@@ -243,6 +275,9 @@ public class LocalProcess {
      {
         if running {
             return
+        }
+        outputDrainLock.withLock {
+            outputDrainDelivered = false
         }
         
         #if canImport(Subprocess)

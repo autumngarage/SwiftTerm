@@ -289,6 +289,9 @@ public protocol TerminalImage {
  * that is provided in the constructor call.
  */
 open class Terminal {
+    public static let minimumColumns = 2
+    public static let minimumRows = 1
+
     public enum ProgressReportState: Int {
         case remove = 0
         case set = 1
@@ -307,8 +310,8 @@ open class Terminal {
         }
     }
 
-    let MINIMUM_COLS = 2
-    let MINIMUM_ROWS = 1
+    let MINIMUM_COLS = Terminal.minimumColumns
+    let MINIMUM_ROWS = Terminal.minimumRows
     
     /// The current terminal columns (counting from 1)
     public private(set) var cols: Int = 80

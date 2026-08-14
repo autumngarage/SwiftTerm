@@ -183,6 +183,10 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate, LocalPr
     open func dataReceived(slice: ArraySlice<UInt8>) {
         feed (byteArray: slice)
     }
+
+    /// Implements the LocalProcessDelegate PTY drain boundary. Subclasses can
+    /// override this to finalize state that depends on all process output.
+    open func processOutputDrained(_ source: LocalProcess) {}
     
     /**
      * Implements the LocalProcessDelegate.getWindowSize method
