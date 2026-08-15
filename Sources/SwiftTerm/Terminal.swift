@@ -289,6 +289,14 @@ public protocol TerminalImage {
  * that is provided in the constructor call.
  */
 open class Terminal {
+    /// The terminal host's current color preference for the pane.
+    ///
+    /// This backs the color-scheme query and notification extension documented at
+    /// https://contour-terminal.org/vt-extensions/color-palette-update-notifications/.
+    public enum ColorSchemePreference: Int, Sendable {
+        case dark = 1
+        case light = 2
+    }
     public static let minimumColumns = 2
     public static let minimumRows = 1
 
@@ -495,6 +503,8 @@ open class Terminal {
     // You can ignore most of the defaults set here, the function
     // reset() will do that again
     var sendFocus: Bool = false
+    public private(set) var colorSchemeUpdatesEnabled: Bool = false
+    public private(set) var colorSchemePreference: ColorSchemePreference = .dark
     var cursorHidden : Bool = false
     
     /// Controls the origin mode (DECOM), when set, the screen is limited to the top and bottom margins
@@ -829,6 +839,23 @@ open class Terminal {
         rebuildAnsiPalette(notifyDelegate: false)
     }
 
+    /// Returns whether the active terminal colors already match a host palette.
+    /// Any OSC 4 override, including indices 16...255, makes the palette differ
+    /// because reinstalling the host palette will clear that override.
+    public func paletteMatches(
+        foreground: Color,
+        background: Color,
+        cursor: Color?,
+        baseAnsiColors: [Color]
+    ) -> Bool {
+        guard baseAnsiColors.count == 16 else { return false }
+        return foregroundColor == foreground
+            && backgroundColor == background
+            && cursorColor == cursor
+            && Array(ansiColors.prefix(16)) == baseAnsiColors
+            && ansiColors == defaultAnsiColors
+    }
+
     private func rebuildAnsiPalette(notifyDelegate: Bool) {
         defaultAnsiColors = Color.setupDefaultAnsiColors(initialColors: installedColors,
                                                          strategy: options.ansi256PaletteStrategy,
@@ -988,6 +1015,7 @@ open class Terminal {
         applicationKeypad = false
         applicationCursor = false
         originMode = false
+        colorSchemeUpdatesEnabled = false
         
         setMarginMode(false)
         setInsertMode(false)
@@ -3411,6 +3439,8 @@ open class Terminal {
                 res = bracketedPasteMode ? modeSet : modeReset
             case 2026:
                 res = synchronizedOutputActive ? modeSet : modeReset
+            case 2031:
+                res = colorSchemeUpdatesEnabled ? modeSet : modeReset
             default:
                 break
             }
@@ -3651,10 +3681,28 @@ open class Terminal {
             case 85:
                 // Multiple session status, we reply single session
                 sendResponse (cc.CSI, "?83n")
+            case 996:
+                reportColorScheme()
             default:
                 break
             }
         }
+    }
+
+    /// Updates the host-owned color preference and optionally emits the
+    /// unsolicited DSR requested with DECSET 2031. Hosts decide whether the
+    /// palette actually changed so font/layout refreshes cannot forge reports.
+    public func updateColorScheme(
+        _ preference: ColorSchemePreference,
+        paletteChanged: Bool
+    ) {
+        colorSchemePreference = preference
+        guard paletteChanged, colorSchemeUpdatesEnabled else { return }
+        reportColorScheme()
+    }
+
+    private func reportColorScheme() {
+        sendResponse(cc.CSI, "?997;\(colorSchemePreference.rawValue)n")
     }
 
     //
@@ -4224,6 +4272,8 @@ open class Terminal {
                 break
             case 2026: // synchronized output (https://github.com/contour-terminal/vt-extensions)
                 endSynchronizedOutput ()
+            case 2031: // color palette update notifications
+                colorSchemeUpdatesEnabled = false
             default:
                 log ("Unhandled DEC Private Mode Reset (DECRST) with \(par)")
                 break
@@ -4465,6 +4515,8 @@ open class Terminal {
                 bracketedPasteMode = true
             case 2026: // synchronized output (https://github.com/contour-terminal/vt-extensions)
                 beginSynchronizedOutput ()
+            case 2031: // color palette update notifications
+                colorSchemeUpdatesEnabled = true
             default:
                 log ("Unhandled DEC Private Mode Set (DECSET) with \(par)")
                 break;
