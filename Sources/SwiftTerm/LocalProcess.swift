@@ -225,11 +225,12 @@ public class LocalProcess {
         dispatchQueue.sync {
             delegate?.dataReceived(slice: b[...])
         }
-        if done {
-            finishOutputDrain()
-        } else {
-            io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
-        }
+        // `done` completes this finite `readSize` request; it does not mean
+        // the stream reached EOF. A busy TUI can fill the whole request while
+        // its shell is still alive. Treating that boundary as EOF sets
+        // `childfd` to -1 and permanently bricks both input and output after
+        // exactly 128 KiB. Only an empty read above is the PTY drain boundary.
+        io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
     }
 
     /// Deliver the drain boundary on the same queue as process output. The
