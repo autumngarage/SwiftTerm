@@ -248,7 +248,14 @@ final class SearchTests {
         terminal.feed(text: "Hello World Hello")
 
         #expect(engine.findNextWithSelection(term: "", cachedSearchTerm: nil, previousSelection: nil) == nil)
-        #expect(engine.findNextWithSelection(term: "Hello", cachedSearchTerm: nil, previousSelection: nil) == SearchResult(term: "Hello", col: 0, row: 0, size: 5))
+        // A term with no previous selection is a NEW query, and a new query is
+        // anchored to the viewport rather than to row 0: the scan starts at the
+        // bottom of the visible region and works upward, so on a line holding
+        // several occurrences it returns the last one. Both matches are on the
+        // only row here, so the nearest is the one at column 12. Searching from
+        // the top instead sent the first keystroke of a live search to the
+        // oldest match in scrollback while an on-screen one sat in view.
+        #expect(engine.findNextWithSelection(term: "Hello", cachedSearchTerm: nil, previousSelection: nil) == SearchResult(term: "Hello", col: 12, row: 0, size: 5))
 
         let selection = SearchSelection(start: Position(col: 0, row: 0), end: Position(col: 5, row: 0))
         #expect(engine.findNextWithSelection(term: "Hello", cachedSearchTerm: "Hello", previousSelection: selection) == SearchResult(term: "Hello", col: 12, row: 0, size: 5))
