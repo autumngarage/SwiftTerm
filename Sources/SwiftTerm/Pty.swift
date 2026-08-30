@@ -16,6 +16,53 @@ import Foundation
  * `setWinSize` and `availableBytes`
  */
 public class PseudoTerminalHelpers {
+    /// Serializes every SwiftTerm PTY allocation through the point where each
+    /// parent-owned endpoint is close-on-exec. A later terminal can therefore
+    /// never fork while an older terminal's descriptor is still inheritable.
+    ///
+    /// The child side of `fork` must never touch this inherited locked object:
+    /// it uses raw C calls through `execve`/`_exit`, while only the parent and
+    /// failure branches unlock it explicitly.
+    private static let descriptorCreationLock = NSLock()
+
+    /// Opens a PTY pair whose parent-owned endpoints cannot cross an exec
+    /// boundary unless a spawner explicitly maps them for its child.
+    static func openPseudoTerminal() throws -> (master: Int32, slave: Int32) {
+        descriptorCreationLock.lock()
+
+        var master: Int32 = -1
+        var slave: Int32 = -1
+        let result = openpty(&master, &slave, nil, nil, nil)
+        guard result == 0 else {
+            let errorCode = errno
+            descriptorCreationLock.unlock()
+            throw POSIXError(POSIXErrorCode(rawValue: errorCode) ?? .EIO)
+        }
+
+        if let errorCode = closeOnExecError(for: master)
+            ?? closeOnExecError(for: slave)
+        {
+            close(master)
+            close(slave)
+            descriptorCreationLock.unlock()
+            throw POSIXError(POSIXErrorCode(rawValue: errorCode) ?? .EIO)
+        }
+
+        descriptorCreationLock.unlock()
+        return (master, slave)
+    }
+
+    /// Preserve all descriptor flags while requiring `FD_CLOEXEC`. Returning
+    /// the captured errno lets callers close every partially-created endpoint
+    /// before they expose an unsafe PTY to the rest of the process.
+    private static func closeOnExecError(for descriptor: Int32) -> Int32? {
+        let flags = fcntl(descriptor, F_GETFD)
+        guard flags != -1 else { return errno }
+        guard fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) != -1 else {
+            return errno
+        }
+        return nil
+    }
     
     /* Taken from Swift's StdLib: https://github.com/apple/swift/blob/master/stdlib/private/SwiftPrivate/SwiftPrivate.swift */
     static func scan<
@@ -84,13 +131,17 @@ public class PseudoTerminalHelpers {
 
         var master: Int32 = 0
 
+        descriptorCreationLock.lock()
         let pid = forkpty(&master, nil, nil, &desiredWindowSize)
         if pid < 0 {
+            let errorCode = errno
+            descriptorCreationLock.unlock()
             // Clean up on fork failure
             free(cExec)
             cDir.map { free($0) }
             for p in cArgs { p.map { free($0) } }
             for p in cEnv { p.map { free($0) } }
+            errno = errorCode
             return nil
         }
         if pid == 0 {
@@ -99,6 +150,25 @@ public class PseudoTerminalHelpers {
             execve(cExec, &cArgs, &cEnv)
             _exit(1) // execve failed
         }
+
+        if let errorCode = closeOnExecError(for: master) {
+            // Never return an inheritable PTY. The child already exists, so
+            // fail closed by terminating and reaping it before another
+            // SwiftTerm launch can acquire the descriptor-creation lock.
+            close(master)
+            _ = kill(pid, SIGKILL)
+            var status: Int32 = 0
+            while waitpid(pid, &status, 0) == -1, errno == EINTR {}
+            descriptorCreationLock.unlock()
+
+            free(cExec)
+            cDir.map { free($0) }
+            for p in cArgs { p.map { free($0) } }
+            for p in cEnv { p.map { free($0) } }
+            errno = errorCode
+            return nil
+        }
+        descriptorCreationLock.unlock()
 
         // Parent — free the copies (child has execve'd, so its copies are gone)
         free(cExec)
