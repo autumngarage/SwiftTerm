@@ -9,6 +9,9 @@
 #if !os(iOS) && !os(Windows)
 import Foundation
 import Dispatch
+#if canImport(os)
+import os
+#endif
 #if false //canImport(Subprocess)
 import Subprocess
 import System
@@ -61,6 +64,21 @@ public protocol LocalProcessDelegate: AnyObject {
  * This implementation uses swift-subprocess with openpty/login_tty for pseudo-terminal support.
  */
 public class LocalProcess {
+    #if canImport(os)
+    private static let launchLogger = Logger(
+        subsystem: "com.vesper",
+        category: "swiftterm-process-launch"
+    )
+    #endif
+
+    private static func reportLaunchFailure(_ message: String) {
+        #if canImport(os)
+        launchLogger.error("\(message, privacy: .public)")
+        #else
+        fputs("SwiftTerm: \(message)\n", stderr)
+        #endif
+    }
+
     let readSize = 128*1024
     
     /* The file descriptor used to communicate with the child process */
@@ -399,7 +417,7 @@ public class LocalProcess {
             var size = delegate?.getWindowSize () ?? winsize()
             
             // Create pseudo-terminal pair using openpty
-            let (master, slave) = try createPseudoTerminal()
+            let (master, slave) = try PseudoTerminalHelpers.openPseudoTerminal()
             self.masterFd = master
             self.slaveFd = slave
             self.childfd = master
@@ -446,11 +464,30 @@ public class LocalProcess {
                     // Start subprocess with swift-subprocess, using the slave side of the pty
                     // The subprocess will automatically handle the pseudo-terminal setup when using FileDescriptor I/O
                     var options = PlatformOptions()
-                    options.preSpawnProcessConfigurator = { spawnAttr, fileAttr in
+                    options.preSpawnProcessConfigurator = { spawnAttr, _ in
                         var flags: Int16 = 0
-                        posix_spawnattr_getflags(&spawnAttr, &flags)
-                        posix_spawnattr_setflags(&spawnAttr, flags | Int16(POSIX_SPAWN_SETSID))
-                        
+                        let getFlagsResult = posix_spawnattr_getflags(&spawnAttr, &flags)
+                        guard getFlagsResult == 0 else {
+                            throw POSIXError(
+                                POSIXErrorCode(rawValue: getFlagsResult) ?? .EIO
+                            )
+                        }
+                        var requiredFlags = Int16(POSIX_SPAWN_SETSID)
+                        #if os(macOS)
+                        // This child closes every unspecified inherited
+                        // descriptor. The subprocess file actions explicitly
+                        // preserve the slave mappings for stdin/stdout/stderr.
+                        requiredFlags |= Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)
+                        #endif
+                        let setFlagsResult = posix_spawnattr_setflags(
+                            &spawnAttr,
+                            flags | requiredFlags
+                        )
+                        guard setFlagsResult == 0 else {
+                            throw POSIXError(
+                                POSIXErrorCode(rawValue: setFlagsResult) ?? .EIO
+                            )
+                        }
                     }
                     let result = try await Subprocess.run(
                         .name(executable),
@@ -481,14 +518,18 @@ public class LocalProcess {
                         childStopped()
                         self.delegate?.processTerminated(self, exitCode: nil)
                     }
-                    print("Failed to start process with swift-subprocess: \(error)")
+                    Self.reportLaunchFailure(
+                        "Failed to start \(executable) with swift-subprocess: \(error)"
+                    )
                 }
             }
             
         } catch {
             childStopped()
             delegate?.processTerminated(self, exitCode: nil)
-            print("Failed to create pseudo-terminal: \(error)")
+            Self.reportLaunchFailure(
+                "Failed to create pseudo-terminal for \(executable): \(error)"
+            )
         }
     }
     #endif
@@ -555,6 +596,13 @@ public class LocalProcess {
             io.read(offset: 0, length: readSize, queue: readQueue) { [weak self] done, data, errno in
                 self?.childProcessRead(done: done, data: data, errno: errno)
             }
+        } else {
+            let errorCode = errno
+            childStopped()
+            delegate?.processTerminated(self, exitCode: nil)
+            Self.reportLaunchFailure(
+                "Failed to launch \(executable) with forkpty: errno=\(errorCode)"
+            )
         }
     }
 

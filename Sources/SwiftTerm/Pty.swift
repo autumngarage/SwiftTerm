@@ -21,6 +21,68 @@ public class PseudoTerminalHelpers {
         let count: Int
     }
 
+    /// Serializes every SwiftTerm PTY allocation through the point where each
+    /// parent-owned endpoint is close-on-exec. A later terminal can therefore
+    /// never fork while an older terminal's descriptor is still inheritable.
+    ///
+    /// The child side of `fork` must never touch this inherited locked object:
+    /// it uses raw C calls through `execve`/`_exit`, while only the parent and
+    /// failure branches unlock it explicitly.
+    private static let descriptorCreationLock = NSLock()
+
+    /// Opens a PTY pair whose parent-owned endpoints cannot cross an exec
+    /// boundary unless a spawner explicitly maps them for its child.
+    static func openPseudoTerminal() throws -> (master: Int32, slave: Int32) {
+        descriptorCreationLock.lock()
+
+        var master: Int32 = -1
+        var slave: Int32 = -1
+        let result = openpty(&master, &slave, nil, nil, nil)
+        guard result == 0 else {
+            let errorCode = errno
+            descriptorCreationLock.unlock()
+            throw POSIXError(POSIXErrorCode(rawValue: errorCode) ?? .EIO)
+        }
+
+        if let errorCode = closeOnExecError(for: master)
+            ?? closeOnExecError(for: slave)
+        {
+            close(master)
+            close(slave)
+            descriptorCreationLock.unlock()
+            throw POSIXError(POSIXErrorCode(rawValue: errorCode) ?? .EIO)
+        }
+
+        descriptorCreationLock.unlock()
+        return (master, slave)
+    }
+
+    /// Preserve all descriptor flags while requiring `FD_CLOEXEC`. Returning
+    /// the captured errno lets callers close every partially-created endpoint
+    /// before they expose an unsafe PTY to the rest of the process.
+    private static func closeOnExecError(for descriptor: Int32) -> Int32? {
+        let flags = fcntl(descriptor, F_GETFD)
+        guard flags != -1 else { return errno }
+        guard fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) != -1 else {
+            return errno
+        }
+        return nil
+    }
+    
+    /* Taken from Swift's StdLib: https://github.com/apple/swift/blob/master/stdlib/private/SwiftPrivate/SwiftPrivate.swift */
+    static func scan<
+      S : Sequence, U
+    >(_ seq: S, _ initial: U, _ combine: (U, S.Iterator.Element) -> U) -> [U] {
+      var result: [U] = []
+      result.reserveCapacity(seq.underestimatedCount)
+      var runningResult = initial
+      for element in seq {
+        runningResult = combine(runningResult, element)
+        result.append(runningResult)
+      }
+      return result
+    }
+
     private static func allocateCStringArray(_ strings: [String]) -> CStringArray? {
         let base = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: strings.count + 1)
         var initializedCount = 0
@@ -94,8 +156,14 @@ public class PseudoTerminalHelpers {
 
         var master: Int32 = 0
         
+        // Serialise PTY allocation through the point where the parent-owned
+        // master is close-on-exec, so a second terminal cannot fork while this
+        // one's descriptor is still inheritable. The child never touches this
+        // lock: from here it runs only raw C calls to execve/_exit.
+        descriptorCreationLock.lock()
         let pid = forkpty(&master, nil, nil, &desiredWindowSize)
         if pid < 0 {
+            descriptorCreationLock.unlock()
             return nil
         }
         if pid == 0 {
@@ -106,6 +174,19 @@ public class PseudoTerminalHelpers {
             _ = execve(cExecutable, cArgs.base, cEnv.base)
             _exit(127)
         }
+        if let errorCode = closeOnExecError(for: master) {
+            // Never hand back an inheritable PTY. The child already exists, so
+            // fail closed: terminate and reap it before another launch can take
+            // the lock. The `defer` above still frees the C strings.
+            close(master)
+            _ = kill(pid, SIGKILL)
+            var status: Int32 = 0
+            while waitpid(pid, &status, 0) == -1, errno == EINTR {}
+            descriptorCreationLock.unlock()
+            errno = errorCode
+            return nil
+        }
+        descriptorCreationLock.unlock()
         return (pid, master)
     }
     
