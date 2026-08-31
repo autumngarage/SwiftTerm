@@ -1786,6 +1786,18 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public func iTermContent (source: Terminal, content: ArraySlice<UInt8>) {
         terminalDelegate?.iTermContent(source: self, content: content)
     }
+
+    /// Forwards an OSC 52 clipboard write from the emulator to this view's
+    /// `TerminalViewDelegate`, mirroring `iOSTerminalView`.
+    ///
+    /// Without this hop the empty `TerminalDelegate` default in `Terminal`
+    /// satisfies the conformance, so the decoded content is discarded and
+    /// `LocalProcessTerminalView.clipboardCopy(source:content:)` is never
+    /// reached. Declared `open`, unlike the other bridges here, so a subclass
+    /// can decide whether a given pane may write the pasteboard.
+    open func clipboardCopy(source: Terminal, content: Data) {
+        terminalDelegate?.clipboardCopy(source: self, content: content)
+    }
 }
 
 
