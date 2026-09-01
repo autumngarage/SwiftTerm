@@ -695,14 +695,50 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         } else if optionAsMetaKey && eventFlags.contains (.option) {
             if let rawCharacter = event.charactersIgnoringModifiers {
                 if let fs = rawCharacter.unicodeScalars.first {
+                    // Option+Left/Right carry two meanings for the same chord.
+                    // At a shell prompt it is word motion, which readline and
+                    // zsh bind to `ESC b`/`ESC f` and which macOS users expect.
+                    // Inside a full-screen application it is the Alt modifier,
+                    // and a `.tmux.conf` binding `M-Left` matches the CSI
+                    // modified arrow instead. The alternate screen is what
+                    // distinguishes the two: a TUI switches to it, a shell
+                    // prompt does not.
+                    //
+                    // tmux is the case worth being explicit about, because it
+                    // looks like a counter-example and is not. It emits
+                    // `ESC [ ? 1049 h` as the first bytes of an attach and
+                    // never leaves the alternate screen until it detaches, so
+                    // the outer terminal is on the alternate screen for the
+                    // whole session — including while a pane sits at an
+                    // ordinary shell prompt. `M-Left` therefore reaches tmux
+                    // as the modified arrow its bindings match, and word
+                    // motion inside a pane is tmux's own to encode.
+                    let onAlternateScreen = terminal.isCurrentBufferAlternate
                     switch Int (fs.value) {
                     case NSLeftArrowFunctionKey:
-                        send (EscapeSequences.emacsBack)
+                        send (onAlternateScreen ? EscapeSequences.metaLeft : EscapeSequences.emacsBack)
                         return
                     case NSRightArrowFunctionKey:
-                        send (EscapeSequences.emacsForward)
+                        send (onAlternateScreen ? EscapeSequences.metaRight : EscapeSequences.emacsForward)
+                        return
+                    case NSUpArrowFunctionKey:
+                        // No word-motion meaning to preserve, so these are the
+                        // modified arrow in both screens. They previously fell
+                        // through and sent the raw arrow scalar.
+                        send (EscapeSequences.metaUp)
+                        return
+                    case NSDownArrowFunctionKey:
+                        send (EscapeSequences.metaDown)
                         return
                     default: break
+                    }
+                    // Any other function key reaching here has no meta
+                    // encoding, and its scalar is in the private-use area
+                    // (0xF700-0xF8FF) that AppKit uses for them. Sending it as
+                    // text produced bytes no terminal application can read;
+                    // sending nothing at least cannot be misread.
+                    if (0xF700 ... 0xF8FF).contains (fs.value) {
+                        return
                     }
                 }
                 send (EscapeSequences.cmdEsc)
