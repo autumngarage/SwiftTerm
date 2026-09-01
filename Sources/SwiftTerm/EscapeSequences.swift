@@ -122,6 +122,19 @@ public struct EscapeSequences {
     /// Emacs forward-word (meta-f)
     public static let emacsForward: [UInt8] = [ 0x1b, 0x66]
 
+    // CSI modified arrows with the Alt/Meta modifier (parameter 3) — what a
+    // full-screen application matches when a `.tmux.conf` binds `M-Left` and
+    // friends. `ESC b`/`ESC f` above are the shell's word motion, which is a
+    // different meaning for the same chord; see MacTerminalView.keyDown.
+    /// Alt/Meta-up arrow — `ESC [ 1 ; 3 A`
+    public static let metaUp: [UInt8] = [ 0x1b, 0x5b, 0x31, 0x3b, 0x33, 0x41 ]
+    /// Alt/Meta-down arrow — `ESC [ 1 ; 3 B`
+    public static let metaDown: [UInt8] = [ 0x1b, 0x5b, 0x31, 0x3b, 0x33, 0x42 ]
+    /// Alt/Meta-right arrow — `ESC [ 1 ; 3 C`
+    public static let metaRight: [UInt8] = [ 0x1b, 0x5b, 0x31, 0x3b, 0x33, 0x43 ]
+    /// Alt/Meta-left arrow — `ESC [ 1 ; 3 D`
+    public static let metaLeft: [UInt8] = [ 0x1b, 0x5b, 0x31, 0x3b, 0x33, 0x44 ]
+
     /// Control-left arrow
     public static let controlLeft: [UInt8] = [ 0x1b, 0x5b, 0x31, 0x3b, 0x35, 0x44 ]
     /// Control-right arrow
