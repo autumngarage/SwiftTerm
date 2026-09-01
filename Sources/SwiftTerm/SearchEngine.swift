@@ -385,8 +385,8 @@ final class SearchEngine {
         body: (Int, String) -> Bool
     ) {
         guard !term.isEmpty else { return }
-        let accepts: (Int, String) -> Bool = { index, candidate in
-            !options.wholeWord || self.isWholeWord(searchIndex: index, line: stringLine, term: candidate)
+        let accepts: (Range<String.Index>) -> Bool = { range in
+            !options.wholeWord || self.isWholeWord(matchRange: range, in: stringLine)
         }
 
         // `String` is not random-access, so `distance(from: startIndex, ...)`
@@ -420,7 +420,7 @@ final class SearchEngine {
                       let matchRange = Range(match.range, in: stringLine) else { return }
                 let index = offset(of: matchRange.lowerBound)
                 let candidate = String(stringLine[matchRange])
-                guard accepts(index, candidate) else { return }
+                guard accepts(matchRange) else { return }
                 if !body(index, candidate) {
                     stop.pointee = true
                 }
@@ -435,7 +435,7 @@ final class SearchEngine {
                       range: lowerBound..<stringLine.endIndex
                   ) {
                 let index = offset(of: foundRange.lowerBound)
-                let isAccepted = accepts(index, term)
+                let isAccepted = accepts(foundRange)
                 if isAccepted, !body(index, term) {
                     return
                 }
@@ -536,33 +536,33 @@ final class SearchEngine {
         return result
     }
 
-    private func isWholeWord (searchIndex: Int, line: String, term: String) -> Bool {
-        let beforeIndex = searchIndex - 1
-        let afterIndex = searchIndex + term.count
-
+    /// Whether the match occupying `range` stands alone as a word.
+    ///
+    /// Indexed by POSITION, not by offset. `String` is not random-access, so
+    /// reaching a neighbour through `index(startIndex, offsetBy:)` — and
+    /// asking for `line.count` — walks the line from the start every time.
+    /// Doing that per candidate made Whole Word search O(matches x line):
+    /// searching `a` against thousands of `a` characters spent the whole
+    /// quadratic on boundary checks, synchronously, per keystroke.
+    ///
+    /// Both neighbours are one step either side of a range the caller already
+    /// holds, so the check is constant work.
+    private func isWholeWord(matchRange range: Range<String.Index>, in line: String) -> Bool {
         let beforeIsBoundary: Bool
-        if beforeIndex < 0 {
+        if range.lowerBound == line.startIndex {
             beforeIsBoundary = true
         } else {
-            beforeIsBoundary = nonWordCharacters.contains(character(at: beforeIndex, in: line) ?? " ")
+            beforeIsBoundary = nonWordCharacters.contains(line[line.index(before: range.lowerBound)])
         }
 
         let afterIsBoundary: Bool
-        if afterIndex >= line.count {
+        if range.upperBound >= line.endIndex {
             afterIsBoundary = true
         } else {
-            afterIsBoundary = nonWordCharacters.contains(character(at: afterIndex, in: line) ?? " ")
+            afterIsBoundary = nonWordCharacters.contains(line[range.upperBound])
         }
 
         return beforeIsBoundary && afterIsBoundary
-    }
-
-    private func character (at offset: Int, in line: String) -> Character? {
-        guard offset >= 0 && offset < line.count else {
-            return nil
-        }
-        let idx = line.index(line.startIndex, offsetBy: offset)
-        return line[idx]
     }
 
     private func findInLine (term: String, searchPosition: inout SearchPosition, searchOptions: SearchOptions? = nil, isReverseSearch: Bool = false) -> SearchResult? {
@@ -606,8 +606,8 @@ final class SearchEngine {
         //
         // Only the word check can reject a candidate, so with Whole Word off
         // the first candidate is always taken and this loops exactly once.
-        let accepts: (Int, String) -> Bool = { index, candidate in
-            !options.wholeWord || self.isWholeWord(searchIndex: index, line: stringLine, term: candidate)
+        let accepts: (Range<String.Index>) -> Bool = { range in
+            !options.wholeWord || self.isWholeWord(matchRange: range, in: stringLine)
         }
 
         if options.regex {
@@ -629,7 +629,7 @@ final class SearchEngine {
                     guard match.range.length > 0, let matchRange = Range(match.range, in: stringLine) else { continue }
                     let index = stringLine.distance(from: stringLine.startIndex, to: matchRange.lowerBound)
                     let candidate = String(stringLine[matchRange])
-                    if accepts(index, candidate) {
+                    if accepts(matchRange) {
                         resultIndex = index
                         matchTerm = candidate
                         break
@@ -652,7 +652,7 @@ final class SearchEngine {
                           let matchRange = Range(match.range, in: stringLine) else { return }
                     let index = stringLine.distance(from: stringLine.startIndex, to: matchRange.lowerBound)
                     let candidate = String(stringLine[matchRange])
-                    guard accepts(index, candidate) else { return }
+                    guard accepts(matchRange) else { return }
                     resultIndex = index
                     matchTerm = candidate
                     stop.pointee = true
@@ -672,7 +672,7 @@ final class SearchEngine {
                         range: stringLine.startIndex..<upperBound
                     ) {
                         let index = stringLine.distance(from: stringLine.startIndex, to: foundRange.lowerBound)
-                        if accepts(index, matchTerm) {
+                        if accepts(foundRange) {
                             resultIndex = index
                             break
                         }
@@ -702,7 +702,7 @@ final class SearchEngine {
                           range: lowerBound..<stringLine.endIndex
                       ) {
                     let index = stringLine.distance(from: stringLine.startIndex, to: foundRange.lowerBound)
-                    if accepts(index, matchTerm) {
+                    if accepts(foundRange) {
                         resultIndex = index
                         break
                     }
