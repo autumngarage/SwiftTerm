@@ -323,29 +323,133 @@ final class SearchEngine {
         term: String,
         searchOptions: SearchOptions?
     ) -> SearchResult? {
-        var best: SearchResult?
-        var position = SearchPosition(startCol: 0, startRow: start)
-        while true {
-            guard let candidate = findInLine(
-                term: term,
-                searchPosition: &position,
-                searchOptions: searchOptions,
-                isReverseSearch: false
-            ) else { break }
-            guard candidate.row <= limit else { break }
-            best = candidate
-            // Past this match's END, not one column past its start.
-            //
-            // Advancing a single column made the walk consider occurrences
-            // that overlap one it had already accepted — matches the ordinary
-            // search cycle never produces, since Enter and Cmd+G resume from
-            // `previousSelection.end`. It also means the walk steps once per
-            // MATCH rather than once per character.
-            let consumed = max(candidate.size, 1)
-            let offset = (candidate.row - start) * terminal.cols + candidate.col + consumed
-            position = SearchPosition(startCol: offset, startRow: start)
+        // ONE enumeration of the line, not one search per candidate.
+        //
+        // Re-entering `findInLine` per candidate re-searched the remaining
+        // span every time: O(matches x line) on a single logical line,
+        // synchronously on the main actor. A regex like `.` over 20,000
+        // characters of minified output — a routine wrapped terminal line —
+        // made that 20,000 re-entries per keystroke of live search.
+        //
+        // The line itself was never the cost; the cache already held it. The
+        // repeated SEARCH was, so the walk now reads the entry once and steps
+        // through its matches in order.
+        guard let cacheEntry = cachedLine(at: start) else { return nil }
+        let stringLine = cacheEntry.lineAsString
+        let offsets = cacheEntry.lineOffsets
+        let options = searchOptions ?? SearchOptions()
+
+        // Crossing the edge is allowed; STARTING past it is not. Matches
+        // arrive in order, so the first one that begins below the limit ends
+        // the walk and the last one kept is the answer.
+        //
+        // Only the row is needed to make that decision, and `offsets` is
+        // ascending, so a cursor that only moves forward finds it in amortized
+        // constant time. Building the full `SearchResult` per candidate would
+        // restart that walk from the first row every time — O(matches x rows),
+        // the same quadratic shape this method exists to remove — so the
+        // winner is remembered and constructed once, after the walk.
+        var bestIndex: Int?
+        var bestTerm: String?
+        var rowCursor = 0
+        enumerateMatches(in: stringLine, term: term, options: options) { index, candidate in
+            while rowCursor + 1 < offsets.count, index >= offsets[rowCursor + 1] {
+                rowCursor += 1
+            }
+            guard start + rowCursor <= limit else { return false }
+            bestIndex = index
+            bestTerm = candidate
+            return true
         }
-        return best
+
+        guard let foundIndex = bestIndex, let matchTerm = bestTerm else { return nil }
+        return searchResult(
+            term: matchTerm,
+            foundIndex: foundIndex,
+            lineFrom: start,
+            offsets: offsets
+        )
+    }
+
+    /// Walk the acceptable matches of `term` in `stringLine`, in order,
+    /// calling `body` with each match's string index and matched text.
+    /// Returning false from `body` stops the walk.
+    ///
+    /// Candidates rejected by the Whole Word check are skipped rather than
+    /// ending the walk: a line like `NEEDLEX NEEDLE` offers the partial
+    /// first, and abandoning there would miss the valid match beside it.
+    private func enumerateMatches(
+        in stringLine: String,
+        term: String,
+        options: SearchOptions,
+        body: (Int, String) -> Bool
+    ) {
+        guard !term.isEmpty else { return }
+        let accepts: (Int, String) -> Bool = { index, candidate in
+            !options.wholeWord || self.isWholeWord(searchIndex: index, line: stringLine, term: candidate)
+        }
+
+        // `String` is not random-access, so `distance(from: startIndex, ...)`
+        // walks the line every time it is asked. Measuring each match from the
+        // start would make the enumeration quadratic in CHARACTERS — the same
+        // shape this change exists to remove, just moved. Matches arrive in
+        // order, so the offset is carried forward from the previous one and
+        // each hop is only the gap between neighbours; the whole walk is
+        // linear.
+        var cursor = stringLine.startIndex
+        var cursorOffset = 0
+        func offset(of index: String.Index) -> Int {
+            cursorOffset += stringLine.distance(from: cursor, to: index)
+            cursor = index
+            return cursorOffset
+        }
+
+        if options.regex {
+            guard let regex = regex(for: term, caseSensitive: options.caseSensitive) else {
+                return
+            }
+            // The whole line is the range, so `^` still means the start of the
+            // line and a lookbehind can still see what precedes a match.
+            let searchRange = NSRange(stringLine.startIndex..<stringLine.endIndex, in: stringLine)
+            regex.enumerateMatches(
+                in: stringLine,
+                options: Self.subrangeMatching,
+                range: searchRange
+            ) { match, _, stop in
+                guard let match, match.range.length > 0,
+                      let matchRange = Range(match.range, in: stringLine) else { return }
+                let index = offset(of: matchRange.lowerBound)
+                let candidate = String(stringLine[matchRange])
+                guard accepts(index, candidate) else { return }
+                if !body(index, candidate) {
+                    stop.pointee = true
+                }
+            }
+        } else {
+            let compareOptions: String.CompareOptions = options.caseSensitive ? [] : [.caseInsensitive]
+            var lowerBound = stringLine.startIndex
+            while lowerBound < stringLine.endIndex,
+                  let foundRange = stringLine.range(
+                      of: term,
+                      options: compareOptions,
+                      range: lowerBound..<stringLine.endIndex
+                  ) {
+                let index = offset(of: foundRange.lowerBound)
+                let isAccepted = accepts(index, term)
+                if isAccepted, !body(index, term) {
+                    return
+                }
+                // Past this match's END when it was accepted, so the walk
+                // steps once per match and never re-offers an occurrence
+                // overlapping one already taken. A rejected candidate advances
+                // by one instead, because a valid match can overlap it.
+                let next = isAccepted
+                    ? foundRange.upperBound
+                    : stringLine.index(after: foundRange.lowerBound)
+                guard next > lowerBound else { break }
+                lowerBound = next
+            }
+        }
     }
 
     /// The last physical row of the logical line beginning at `start`.
@@ -481,14 +585,7 @@ final class SearchEngine {
             return findInLine(term: term, searchPosition: &searchPosition, searchOptions: searchOptions, isReverseSearch: isReverseSearch)
         }
 
-        var cache = lineCache.getLineFromCache(row: row)
-        if cache == nil {
-            let translated = lineCache.translateBufferLineToStringWithWrap(lineIndex: row, trimRight: true)
-            lineCache.setLineInCache(row: row, entry: translated)
-            cache = translated
-        }
-
-        guard let cacheEntry = cache else {
+        guard let cacheEntry = cachedLine(at: row) else {
             return nil
         }
 
@@ -619,6 +716,33 @@ final class SearchEngine {
             return nil
         }
 
+        return searchResult(term: matchTerm, foundIndex: foundIndex, lineFrom: row, offsets: offsets)
+    }
+
+    /// The logical line beginning at `row`, materializing and caching it on a
+    /// miss. `findInLine` and the viewport-boundary walk both need the same
+    /// entry; the walk reads it once rather than through a search call.
+    private func cachedLine(at row: Int) -> LineCacheEntry? {
+        if let cached = lineCache.getLineFromCache(row: row) {
+            return cached
+        }
+        let translated = lineCache.translateBufferLineToStringWithWrap(lineIndex: row, trimRight: true)
+        lineCache.setLineInCache(row: row, entry: translated)
+        return translated
+    }
+
+    /// Convert a match at `foundIndex` in the logical line beginning at
+    /// `lineFrom` into buffer coordinates.
+    ///
+    /// A logical line spans several physical rows, so the match's row and
+    /// column come from walking `offsets` — the string index each row starts
+    /// at — and its size has to account for the rows it crosses.
+    private func searchResult(
+        term matchTerm: String,
+        foundIndex: Int,
+        lineFrom row: Int,
+        offsets: [Int]
+    ) -> SearchResult {
         var startRowOffset = 0
         while startRowOffset < offsets.count - 1 && foundIndex >= offsets[startRowOffset + 1] {
             startRowOffset += 1
