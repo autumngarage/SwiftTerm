@@ -55,15 +55,86 @@ private extension Attribute.UnderlineStyle {
 
 /// A rendered fragment that starts at a specific column and contains a run of
 /// characters that all occupy the same number of columns.
+///
+/// One terminal cell can hold a grapheme cluster made of several UTF-16 units
+/// (a base character plus combining marks), and CoreText may shape that cell
+/// into a number of glyphs that has nothing to do with how many columns it
+/// occupies. `cellUTF16Starts` records where each cell begins in
+/// `attributedString` so a glyph's string index can be resolved back to the
+/// cell — and therefore the column — it belongs to.
 struct ViewLineSegment {
     let column: Int
     let columnWidth: Int
+    /// Number of terminal cells in this segment.
     let characterCount: Int
+    /// UTF-16 offset into `attributedString` at which each cell starts, or nil
+    /// when every cell is exactly one unit and the offset is the ordinal.
+    ///
+    /// Almost every row is the nil case, and it is the terminal's hot drawing
+    /// path, so the map is built only once a cell turns out to span more than
+    /// one unit.
+    let cellUTF16Starts: [Int]?
     let attributedString: NSAttributedString
 
     var columnSpan: Int {
         return max(0, characterCount * columnWidth)
     }
+
+    /// True when every cell is exactly one UTF-16 unit, so a glyph's string
+    /// index is already its cell ordinal and no mapping is needed.
+    var hasSingleUnitCells: Bool {
+        return cellUTF16Starts == nil
+    }
+
+    /// The cell ordinal containing `utf16Offset`: the last cell whose start is
+    /// at or before it.
+    func cellOrdinal(forUTF16Offset utf16Offset: Int) -> Int {
+        guard let starts = cellUTF16Starts else {
+            // One unit per cell, so the offset is already the ordinal.
+            return min(max(0, utf16Offset), max(0, characterCount - 1))
+        }
+        var low = 0
+        var high = starts.count - 1
+        var result = 0
+        while low <= high {
+            let mid = (low + high) / 2
+            if starts[mid] <= utf16Offset {
+                result = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return result
+    }
+}
+
+/// The terminal column each glyph of `run` belongs to, resolved through the
+/// glyph's string index. Used when a cell's glyph count differs from the number
+/// of columns it occupies, so glyph ordinals can no longer stand in for cells.
+func glyphColumns(run: CTRun, glyphCount: Int, segment: ViewLineSegment) -> [Int] {
+    var stringIndices = [CFIndex](repeating: 0, count: glyphCount)
+    CTRunGetStringIndices(run, CFRange(), &stringIndices)
+    return stringIndices.map { index in
+        segment.column + (segment.cellOrdinal(forUTF16Offset: Int(index)) * segment.columnWidth)
+    }
+}
+
+/// The range of cell ordinals `run` covers, as (lowerBound, upperBound) with
+/// both ends inclusive.
+///
+/// Taken from the run's whole string range rather than from its glyphs'
+/// indices: a ligature glyph reports only the first index of the characters it
+/// replaced, so a run ending in one would otherwise leave the cells the glyph
+/// spans without their background or selection fill.
+func runCellOrdinals(run: CTRun, segment: ViewLineSegment) -> (lowerBound: Int, upperBound: Int) {
+    let stringRange = CTRunGetStringRange(run)
+    guard stringRange.length > 0 else {
+        return (0, 0)
+    }
+    let first = segment.cellOrdinal(forUTF16Offset: stringRange.location)
+    let last = segment.cellOrdinal(forUTF16Offset: stringRange.location + stringRange.length - 1)
+    return (min(first, last), max(first, last))
 }
 
 // Holds the information used to render a line
@@ -629,7 +700,11 @@ extension TerminalView {
         let column: Int
         let columnWidth: Int
         private var attributedString = NSMutableAttributedString()
-        private var characterCount: Int = 0
+        private var cellCount: Int = 0
+        private var utf16Length: Int = 0
+        /// Built only once a cell spans more than one UTF-16 unit; until then
+        /// each cell's start equals its ordinal and the map is redundant.
+        private var cellUTF16Starts: [Int]?
 
         init(column: Int, columnWidth: Int) {
             self.column = column
@@ -637,19 +712,51 @@ extension TerminalView {
         }
 
         var isEmpty: Bool {
-            characterCount == 0
+            cellCount == 0
         }
 
-        mutating func append(text: String, attributes: [NSAttributedString.Key: Any]) {
+        /// Appends one batch of text spanning `cellCount` terminal cells.
+        ///
+        /// `cellUTF16Lengths` is nil when every cell in the batch is exactly
+        /// one UTF-16 unit — the overwhelmingly common case, and the reason
+        /// the caller does not build an array for it. Otherwise it gives each
+        /// cell's length in order, so the segment can map a glyph back to its
+        /// cell.
+        mutating func append(text: String,
+                             cellCount: Int,
+                             cellUTF16Lengths: [Int]?,
+                             attributes: [NSAttributedString.Key: Any]) {
             attributedString.append(NSAttributedString(string: text, attributes: attributes))
-            characterCount += 1
+            guard let lengths = cellUTF16Lengths else {
+                if cellUTF16Starts != nil {
+                    for offset in 0 ..< cellCount {
+                        cellUTF16Starts!.append(utf16Length + offset)
+                    }
+                }
+                utf16Length += cellCount
+                self.cellCount += cellCount
+                return
+            }
+            if cellUTF16Starts == nil {
+                // Every cell so far was one unit, so its start was its ordinal.
+                cellUTF16Starts = Array(0 ..< self.cellCount)
+            }
+            for length in lengths {
+                cellUTF16Starts!.append(utf16Length)
+                utf16Length += length
+            }
+            self.cellCount += lengths.count
         }
 
         func buildIfNeeded() -> ViewLineSegment? {
             guard !isEmpty else {
                 return nil
             }
-            return ViewLineSegment(column: column, columnWidth: columnWidth, characterCount: characterCount, attributedString: attributedString)
+            return ViewLineSegment(column: column,
+                                   columnWidth: columnWidth,
+                                   characterCount: cellCount,
+                                   cellUTF16Starts: cellUTF16Starts,
+                                   attributedString: attributedString)
         }
     }
 
@@ -670,6 +777,10 @@ extension TerminalView {
 
         // Batching state: accumulate consecutive characters with the same attributes
         var pendingText = ""
+        var pendingCellCount = 0
+        // Stays nil while every pending cell is one UTF-16 unit, which is the
+        // common case and keeps this hot path from allocating per row.
+        var pendingCellUTF16Lengths: [Int]? = nil
         var pendingAttrs: [NSAttributedString.Key: Any]? = nil
         var lastAttr: Attribute? = nil
         var lastHasUrl = false
@@ -677,8 +788,13 @@ extension TerminalView {
 
         func flushPending() {
             if !pendingText.isEmpty, let attrs = pendingAttrs {
-                builder?.append(text: pendingText, attributes: attrs)
+                builder?.append(text: pendingText,
+                                cellCount: pendingCellCount,
+                                cellUTF16Lengths: pendingCellUTF16Lengths,
+                                attributes: attrs)
                 pendingText = ""
+                pendingCellCount = 0
+                pendingCellUTF16Lengths = nil
             }
         }
 
@@ -740,7 +856,7 @@ extension TerminalView {
                                                         columnWidth: width,
                                                         codePoint: UInt32(ch.code),
                                                         foregroundColor: fgColor))
-                builder?.append(text: " ", attributes: currentAttributes)
+                builder?.append(text: " ", cellCount: 1, cellUTF16Lengths: nil, attributes: currentAttributes)
                 previousPlaceholder = nil
                 previousPlaceholderAttribute = nil
             // Renders block elements independently of the font
@@ -751,7 +867,7 @@ extension TerminalView {
                 flushPending()
                 let fgColor = (currentAttributes[.foregroundColor] as? TTColor) ?? nativeForegroundColor
                 blockElements.append(BlockElementRenderItem(column: col, columnWidth: width, rects: rects, foregroundColor: fgColor))
-                builder?.append(text: " ", attributes: currentAttributes)
+                builder?.append(text: " ", cellCount: 1, cellUTF16Lengths: nil, attributes: currentAttributes)
                 previousPlaceholder = nil
                 previousPlaceholderAttribute = nil
             } else if let placeholder = KittyPlaceholderDecoder.decode(character: character,
@@ -762,12 +878,23 @@ extension TerminalView {
                                                                        previousAttribute: previousPlaceholderAttribute) {
                 flushPending()
                 kittyPlaceholders.append(placeholder)
-                builder?.append(text: " ", attributes: currentAttributes)
+                builder?.append(text: " ", cellCount: 1, cellUTF16Lengths: nil, attributes: currentAttributes)
                 previousPlaceholder = placeholder
                 previousPlaceholderAttribute = attr
             } else {
                 // Common path: just accumulate into the batch
                 pendingText.append(character)
+                let cellUTF16Length = character.utf16.count
+                if pendingCellUTF16Lengths != nil {
+                    pendingCellUTF16Lengths!.append(cellUTF16Length)
+                } else if cellUTF16Length != 1 {
+                    // First cell in this batch that is not a single unit: the
+                    // earlier ones were, so their lengths are all 1.
+                    var lengths = [Int](repeating: 1, count: pendingCellCount)
+                    lengths.append(cellUTF16Length)
+                    pendingCellUTF16Lengths = lengths
+                }
+                pendingCellCount += 1
                 previousPlaceholder = nil
                 previousPlaceholderAttribute = nil
             }
@@ -1171,12 +1298,19 @@ extension TerminalView {
             }
 
             // Pre-create CTLines and runs once per row to avoid duplicate creation
-            let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])] =
+            let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun], glyphIndexIsCellOrdinal: Bool)] =
                 lineInfo.segments.compactMap { segment in
                     guard segment.attributedString.length > 0 else { return nil }
                     let ctLine = CTLineCreateWithAttributedString(segment.attributedString)
                     guard let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
-                    return (segment, ctLine, runs)
+                    // The overwhelming majority of segments are one UTF-16 unit
+                    // and one glyph per cell; only then does a glyph's ordinal
+                    // double as its cell ordinal. Anything else (combining
+                    // marks, zero-width characters, unequal-count ligatures)
+                    // has to resolve columns through the string indices.
+                    let totalGlyphs = runs.reduce(0) { $0 + CTRunGetGlyphCount($1) }
+                    let glyphIndexIsCellOrdinal = segment.hasSingleUnitCells && totalGlyphs == segment.characterCount
+                    return (segment, ctLine, runs, glyphIndexIsCellOrdinal)
                 }
 
             // Background fill loop — uses cached CTLines
@@ -1193,8 +1327,16 @@ extension TerminalView {
                         continue
                     }
                     let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
-                    let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
-                    let endColumn = startColumn + (runGlyphsCount * prepared.segment.columnWidth)
+                    let startColumn: Int
+                    let endColumn: Int
+                    if prepared.glyphIndexIsCellOrdinal {
+                        startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
+                        endColumn = startColumn + (runGlyphsCount * prepared.segment.columnWidth)
+                    } else {
+                        let cells = runCellOrdinals(run: run, segment: prepared.segment)
+                        startColumn = prepared.segment.column + (cells.lowerBound * prepared.segment.columnWidth)
+                        endColumn = prepared.segment.column + ((cells.upperBound + 1) * prepared.segment.columnWidth)
+                    }
                     var backgroundColor: TTColor?
                     if runAttributes.keys.contains(.selectionBackgroundColor) {
                         backgroundColor = runAttributes[.selectionBackgroundColor] as? TTColor
@@ -1279,6 +1421,11 @@ extension TerminalView {
                     let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
                     let runFont = runAttributes[.font] as! TTFont
                     let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
+                    // Only allocated when a cell's glyph count differs from the
+                    // columns it occupies; nil keeps the common path as-is.
+                    let resolvedColumns: [Int]? = prepared.glyphIndexIsCellOrdinal
+                        ? nil
+                        : glyphColumns(run: run, glyphCount: runGlyphsCount, segment: prepared.segment)
 
                     let runGlyphs = [CGGlyph](unsafeUninitializedCapacity: runGlyphsCount) { (bufferPointer, count) in
                         CTRunGetGlyphs(run, CFRange(), bufferPointer.baseAddress!)
@@ -1291,7 +1438,7 @@ extension TerminalView {
                     var positions = [CGPoint](repeating: .zero, count: runGlyphsCount)
                     for i in 0..<runGlyphsCount {
                         let ctPosition = coreTextPositions[i]
-                        let glyphColumn = startColumn + (i * prepared.segment.columnWidth)
+                        let glyphColumn = resolvedColumns?[i] ?? (startColumn + (i * prepared.segment.columnWidth))
                         positions[i] = CGPoint(
                             x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width,
                             y: lineOrigin.y + yOffset + ctPosition.y)
