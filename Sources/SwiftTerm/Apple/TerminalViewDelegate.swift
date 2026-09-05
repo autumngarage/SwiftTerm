@@ -70,7 +70,19 @@ public protocol TerminalViewDelegate: AnyObject {
      * The default implementation does nothing.
      */
     func clipboardCopy(source: TerminalView, content: Data)
-    
+
+    /**
+     * This method is invoked when the client application has issued a OSC 777
+     * to show a notification.
+     *
+     * - Parameters:
+     *  - source: identifies the instance of the terminal that sent this request
+     *  - title: the title to show for the notification
+     *  - body: the body of the notification
+     * The default implementation does nothing.
+     */
+    func notify(source: TerminalView, title: String, body: String)
+
     /**
      * This method is invoked when the client application (iTerm2) has issued a OSC 1337 and
      * SwiftTerm did not handle a handler for it.
