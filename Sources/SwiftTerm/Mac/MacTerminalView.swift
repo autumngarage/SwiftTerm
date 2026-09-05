@@ -3582,6 +3582,17 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public func clipboardRead(source: Terminal) -> Data? {
         return terminalDelegate?.clipboardRead(source: self)
     }
+
+    /// Forwards an OSC 777 notification from the emulator to this view's
+    /// `TerminalViewDelegate`, mirroring `iOSTerminalView`.
+    ///
+    /// Without this hop the empty `TerminalDelegate` default in `Terminal`
+    /// satisfies the conformance, so the decoded title and body are discarded
+    /// and never reach the host. Declared `open`, unlike the other bridges
+    /// here, so a subclass can decide whether a given pane may post.
+    open func notify(source: Terminal, title: String, body: String) {
+        terminalDelegate?.notify(source: self, title: title, body: body)
+    }
 }
 
 
@@ -3628,6 +3639,9 @@ extension TerminalView {
 // Default implementations for TerminalViewDelegate
 
 extension TerminalViewDelegate {
+    public func notify (source: TerminalView, title: String, body: String) {
+    }
+
     /**
      * Opens the link with the default handler for its scheme
      */

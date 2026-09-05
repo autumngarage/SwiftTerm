@@ -3415,6 +3415,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return terminalDelegate?.clipboardRead(source: self)
     }
 
+    public func notify(source: Terminal, title: String, body: String) {
+        terminalDelegate?.notify(source: self, title: title, body: body)
+    }
+
     public func iTermContent (source: Terminal, content: ArraySlice<UInt8>) {
         terminalDelegate?.iTermContent(source: self, content: content)
     }
@@ -3439,6 +3443,9 @@ extension TerminalViewDelegate {
     
     public func clipboardRead(source: TerminalView) -> Data? {
         return nil
+    }
+
+    public func notify (source: TerminalView, title: String, body: String) {
     }
 }
 
