@@ -3575,7 +3575,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         terminalDelegate?.iTermContent(source: self, content: content)
     }
     
-    public func clipboardCopy(source: Terminal, content: Data) {
+    /// Declared `open`, unlike the other bridges here, so a subclass can decide
+    /// whether a given pane may write the pasteboard at all. OSC 52 is emitted
+    /// by whatever is running in the terminal, including a background job or a
+    /// remote host, and "may this replace the user's clipboard" is a policy the
+    /// embedding application owns, not the emulator.
+    open func clipboardCopy(source: Terminal, content: Data) {
         terminalDelegate?.clipboardCopy(source: self, content: content)
     }
     
