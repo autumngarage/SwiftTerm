@@ -3311,32 +3311,52 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         // jumped a full page on fast flicks — the cause of the visible line
         // "skipping" during fast scrolls. `scrollSensitivity` scales the delta.
         let scaledDelta = event.scrollingDeltaY * scrollSensitivity
-        let lines: Int
+        let unboundedLines: Int
         if event.hasPreciseScrollingDeltas {
             scrollAccumulator += scaledDelta
-            lines = Int(scrollAccumulator / cellHeight)
-            scrollAccumulator -= CGFloat(lines) * cellHeight
+            unboundedLines = Int(scrollAccumulator / cellHeight)
+            scrollAccumulator -= CGFloat(unboundedLines) * cellHeight
         } else {
             scrollAccumulator = 0
             // A non-precise wheel notch must always move at least one line, even
             // when a low sensitivity would otherwise round it away to zero.
+            // A zero vertical delta must stay zero. This fallback exists so a
+            // low sensitivity cannot round a real notch away, but a horizontal
+            // -only event reaches here too, and it has no vertical notch to
+            // preserve.
             let rounded = Int(scaledDelta.rounded())
-            lines = rounded != 0 ? rounded : (event.scrollingDeltaY > 0 ? 1 : -1)
+            if rounded != 0 {
+                unboundedLines = rounded
+            } else if event.scrollingDeltaY > 0 {
+                unboundedLines = 1
+            } else if event.scrollingDeltaY < 0 {
+                unboundedLines = -1
+            } else {
+                unboundedLines = 0
+            }
         }
         // The same translation for the horizontal axis. Trackpads emit it
         // constantly, and an application that asked for mouse reporting expects
         // it as xterm buttons 6 and 7.
         let scaledHorizontalDelta = event.scrollingDeltaX * scrollSensitivity
-        let columns: Int
+        let unboundedColumns: Int
         if event.hasPreciseScrollingDeltas {
             horizontalScrollAccumulator += scaledHorizontalDelta
-            columns = Int(horizontalScrollAccumulator / cellDimension.width)
-            horizontalScrollAccumulator -= CGFloat(columns) * cellDimension.width
+            unboundedColumns = Int(horizontalScrollAccumulator / cellDimension.width)
+            horizontalScrollAccumulator -= CGFloat(unboundedColumns) * cellDimension.width
         } else {
             horizontalScrollAccumulator = 0
             let rounded = Int(scaledHorizontalDelta.rounded())
-            columns = rounded != 0 ? rounded : (event.scrollingDeltaX > 0 ? 1 : (event.scrollingDeltaX < 0 ? -1 : 0))
+            unboundedColumns = rounded != 0 ? rounded : (event.scrollingDeltaX > 0 ? 1 : (event.scrollingDeltaX < 0 ? -1 : 0))
         }
+
+        // One AppKit event must not expand into unbounded main-thread work: a
+        // 10,000-line delta would otherwise emit 10,000 mouse reports, or scroll
+        // 10,000 lines, synchronously. A visible screen is the domain limit; the
+        // floor of 20 keeps an unusually short terminal responsive to a flick.
+        let lineLimit = max(terminal.rows, 20)
+        let lines = max(-lineLimit, min(lineLimit, unboundedLines))
+        let columns = max(-lineLimit, min(lineLimit, unboundedColumns))
 
         if lines == 0 && columns == 0 {
             return
