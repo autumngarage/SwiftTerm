@@ -27,6 +27,20 @@ public class SelectionService: CustomDebugStringConvertible {
         terminal.register (selection: self)
     }
 
+    /// The selection's ends in document order, plus the row range it actually
+    /// covers.
+    ///
+    /// The range end is exclusive, so a selection ending at `(0, row)` takes no
+    /// cells from `row` when it began on an earlier one. Counting that row as
+    /// covered makes a selection look like it straddles a scroll boundary it
+    /// only touches, and it is then dropped instead of translated.
+    private func orderedSelectedRows () -> (first: Position, last: Position, top: Int, bottom: Int)
+    {
+        let (first, last) = Position.compare (start, end) == .before ? (start, end) : (end, start)
+        let bottom = last.col == 0 && last.row > first.row ? last.row - 1 : last.row
+        return (first, last, first.row, bottom)
+    }
+
     /**
      * Translates the selection when the terminal shifts lines in place, which
      * happens when an application scrolls a region set with DECSTBM that does
@@ -44,18 +58,21 @@ public class SelectionService: CustomDebugStringConvertible {
             return
         }
 
-        let (first, last) = Position.compare (start, end) == .before ? (start, end) : (end, start)
-        let intersectsRegion = first.row <= bottom && last.row >= top
+        let selected = orderedSelectedRows ()
+        let intersectsRegion = selected.top <= bottom && selected.bottom >= top
         guard intersectsRegion else {
             return
         }
-        guard first.row >= top && last.row <= bottom else {
+        guard selected.top >= top && selected.bottom <= bottom else {
             selectNone ()
             return
         }
 
         func translate (_ position: Position) -> Position? {
-            guard position.row >= top && position.row <= bottom else {
+            let isExclusiveEndBoundary = position == selected.last
+                && selected.last.col == 0
+                && selected.last.row == selected.bottom + 1
+            guard (position.row >= top && position.row <= bottom) || isExclusiveEndBoundary else {
                 return position
             }
             let newRow = position.row - lines
@@ -115,6 +132,77 @@ public class SelectionService: CustomDebugStringConvertible {
     }
 
     /**
+     * Translates a single-row selection when cells move horizontally within a
+     * row, which `CSI @` (insert), `CSI P` (delete) and the column variants do.
+     *
+     * A row-based range cannot express "some of my cells moved", so anything
+     * spanning rows is dropped. Within one row: a selection entirely before or
+     * after the changed columns is untouched, content wholly inside the range
+     * that survives the shift moves with its cells, and a range that crosses
+     * the insertion or deletion boundary, or whose cells are pushed off the
+     * margin, no longer describes the same text and is cleared.
+     */
+    func adjustForInPlaceCellShift (top: Int, bottom: Int, left: Int, right: Int, columns: Int)
+    {
+        guard active, columns != 0, left <= right else {
+            return
+        }
+
+        let selected = orderedSelectedRows ()
+        guard selected.top <= bottom, selected.bottom >= top else {
+            return
+        }
+        guard selected.first.row == selected.last.row,
+              selected.first.row >= top,
+              selected.first.row <= bottom else {
+            selectNone ()
+            return
+        }
+        // The end column is exclusive: ending exactly at `left` does not overlap.
+        guard selected.last.col > left, selected.first.col <= right else {
+            return
+        }
+
+        let width = right - left + 1
+        let distance = min (abs (columns), width)
+        let delta: Int
+        if columns > 0 {
+            // Insertion pushes cells right; those past the margin are evicted.
+            let sourceEnd = right - distance + 1
+            guard selected.first.col >= left, selected.last.col <= sourceEnd else {
+                selectNone ()
+                return
+            }
+            delta = distance
+        } else {
+            // Deletion pulls cells left; those before the source start are gone.
+            let sourceStart = left + distance
+            guard selected.first.col >= sourceStart, selected.last.col <= right + 1 else {
+                selectNone ()
+                return
+            }
+            delta = -distance
+        }
+
+        func translate (_ position: Position) -> Position {
+            Position (col: position.col + delta, row: position.row)
+        }
+
+        let originalStart = start
+        let originalEnd = end
+        start = translate (originalStart)
+        end = translate (originalEnd)
+        if let pivot, pivot == originalStart || pivot == originalEnd {
+            self.pivot = translate (pivot)
+        }
+        if let wordSelectionAnchor {
+            self.wordSelectionAnchor = (translate (wordSelectionAnchor.start),
+                                        translate (wordSelectionAnchor.end))
+        }
+        terminal.tdel?.selectionChanged (source: terminal)
+    }
+
+    /**
      * Clears the selection if it overlaps a region whose contents were shifted
      * only within a range of columns, which happens when margin mode narrows
      * the scrolled area (DECSLRM).  A selection cannot be represented as
@@ -126,13 +214,16 @@ public class SelectionService: CustomDebugStringConvertible {
             return
         }
 
-        let (first, last) = Position.compare (start, end) == .before ? (start, end) : (end, start)
-        guard first.row <= bottom && last.row >= top else {
+        let selected = orderedSelectedRows ()
+        guard selected.top <= bottom, selected.bottom >= top else {
             return
         }
         // A single-row selection that sits entirely outside the margin columns
         // is unaffected; anything spanning rows crosses them by definition.
-        if first.row == last.row && (last.col < left || first.col > right) {
+        // The end column is exclusive, so ending exactly at `left` does not
+        // overlap the restricted range.
+        if selected.first.row == selected.last.row,
+           selected.last.col <= left || selected.first.col > right {
             return
         }
         selectNone ()

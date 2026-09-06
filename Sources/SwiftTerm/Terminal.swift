@@ -374,6 +374,19 @@ open class Terminal {
         body ()
     }
 
+    /// Wires the callbacks a buffer needs to reach back into the terminal.
+    /// Kept in one place so a buffer replaced at runtime cannot be left with
+    /// only some of them connected.
+    private func configureCallbacks (for buffer: Buffer)
+    {
+        buffer.scroll = { [weak self] wrapped in
+            self?.scroll (isWrapped: wrapped)
+        }
+        buffer.inPlaceCellShift = { [weak self] row, left, right, columns in
+            self?.selectionsAdjustForInPlaceCellShift (top: row, bottom: row, left: left, right: right, columns: columns)
+        }
+    }
+
     func register (selection: SelectionService)
     {
         selections.removeAll { $0.value == nil }
@@ -390,6 +403,29 @@ open class Terminal {
         withStructuralSelectionChange {
             for entry in selections {
                 entry.value?.adjustForInPlaceScroll (top: top, bottom: bottom, lines: lines)
+            }
+        }
+    }
+
+    /// Notifies attached selections that cells moved horizontally within
+    /// `top...bottom`, inside the columns `left...right`. Positive `columns`
+    /// inserts (cells move right), negative deletes (cells move left).
+    func selectionsAdjustForInPlaceCellShift (top: Int, bottom: Int, left: Int, right: Int, columns: Int)
+    {
+        withStructuralSelectionChange {
+            for entry in selections {
+                entry.value?.adjustForInPlaceCellShift (top: top, bottom: bottom, left: left, right: right, columns: columns)
+            }
+        }
+    }
+
+    /// Drops every attached selection. Used where the visible text is replaced
+    /// wholesale rather than moved, so no anchor can be translated.
+    func selectionsClear ()
+    {
+        withStructuralSelectionChange {
+            for entry in selections {
+                entry.value?.selectNone ()
             }
         }
     }
@@ -829,8 +865,8 @@ open class Terminal {
         parser.terminal = self
         configureParser (parser)
         
-        normalBuffer.scroll = { [weak self] wrapped in self?.scroll(isWrapped: wrapped) }
-        altBuffer.scroll = { [weak self] wrapped in self?.scroll(isWrapped: wrapped) }
+        configureCallbacks (for: normalBuffer)
+        configureCallbacks (for: altBuffer)
 
         setupTabStops()
 
@@ -942,7 +978,7 @@ open class Terminal {
     public func resetNormalBuffer() {
         normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth,
                               scrollback: options.scrollback, bidiState: currentBidiState)
-        normalBuffer.scroll = { [weak self] wrapped in self?.scroll(isWrapped: wrapped) }
+        configureCallbacks (for: normalBuffer)
 
         normalBuffer.fillViewportRows()
         normalBuffer.setupTabStops(tabStopWidth: tabStopWidth)
@@ -952,6 +988,8 @@ open class Terminal {
         if buffer === normalBuffer {
             return
         }
+        // The visible text is replaced, not moved: no anchor survives.
+        selectionsClear ()
         semanticNoteAlternateScreenSwitch()
         normalBuffer.x = altBuffer.x
         normalBuffer.y = altBuffer.y
@@ -971,6 +1009,8 @@ open class Terminal {
         if buffer === altBuffer {
             return
         }
+        // The visible text is replaced, not moved: no anchor survives.
+        selectionsClear ()
         semanticNoteAlternateScreenSwitch()
         altBuffer.x = normalBuffer.x
         altBuffer.y = normalBuffer.y
@@ -3087,7 +3127,15 @@ open class Terminal {
         let cd = CharData (attribute: eraseAttr ())
         let buffer = self.buffer
         
-        buffer.lines [buffer.y + buffer.yBase].insertCells (pos: buffer.x, n: pars.count > 0 ? max (pars [0], 1) : 1, rightMargin: marginMode ? buffer.marginRight : cols-1, fillData: cd)
+        let rightMargin = marginMode ? buffer.marginRight : cols-1
+        let requested = pars.count > 0 ? max (pars [0], 1) : 1
+        buffer.lines [buffer.y + buffer.yBase].insertCells (pos: buffer.x, n: requested, rightMargin: rightMargin, fillData: cd)
+        // Only the cells up to the margin actually move; the rest are evicted.
+        let inserted = min (requested, max (0, rightMargin - buffer.x + 1))
+        if inserted > 0 {
+            let row = buffer.y + buffer.yBase
+            selectionsAdjustForInPlaceCellShift (top: row, bottom: row, left: buffer.x, right: rightMargin, columns: inserted)
+        }
 
         updateRange (buffer.y)
     }
@@ -3395,10 +3443,14 @@ open class Terminal {
             // Clear scrollback (everything not in viewport)
             let scrollBackSize = buffer.lines.count - rows
             if scrollBackSize > 0 {
+                let previousLineCount = buffer.lines.count
                 buffer.lines.trimStart (count: scrollBackSize)
                 buffer.linesTop = 0
                 buffer.yBase = max (buffer.yBase - scrollBackSize, 0)
                 buffer.yDisp = max (buffer.yDisp - scrollBackSize, 0)
+                // Every surviving row moved up by the trimmed count; anchors in
+                // the discarded rows have nothing left to point at.
+                selectionsAdjustForInPlaceScroll (top: 0, bottom: previousLineCount - 1, lines: scrollBackSize)
             }
             break;
         default:
@@ -3763,10 +3815,15 @@ open class Terminal {
                 return
             }
             
+            let rightMargin = marginMode ? buffer.marginRight : cols-1
             for row in buffer.scrollTop...buffer.scrollBottom {
                 let line = buffer.lines [row+buffer.yBase]
-                line.insertCells(pos: buffer.x, n: n, rightMargin: marginMode ? buffer.marginRight : cols-1, fillData: buffer.getNullCell())
+                line.insertCells(pos: buffer.x, n: n, rightMargin: rightMargin, fillData: buffer.getNullCell())
                 line.isWrapped = false
+            }
+            let inserted = min (n, max (0, rightMargin - buffer.x + 1))
+            if inserted > 0 {
+                selectionsAdjustForInPlaceCellShift (top: buffer.yBase + buffer.scrollTop, bottom: buffer.yBase + buffer.scrollBottom, left: buffer.x, right: rightMargin, columns: inserted)
             }
             updateRange (startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
             return
@@ -6106,8 +6163,14 @@ open class Terminal {
         if buffer.x == buffer.cols {
             return
         }
+        let rightMargin = marginMode ? buffer.marginRight : cols-1
         buffer.lines [buffer.y + buffer.yBase].deleteCells (
-            pos: buffer.x, n: p, rightMargin: marginMode ? buffer.marginRight : cols-1, fillData: CharData (attribute: eraseAttr ()))
+            pos: buffer.x, n: p, rightMargin: rightMargin, fillData: CharData (attribute: eraseAttr ()))
+        let deleted = min (p, max (0, rightMargin - buffer.x + 1))
+        if deleted > 0 {
+            let row = buffer.y + buffer.yBase
+            selectionsAdjustForInPlaceCellShift (top: row, bottom: row, left: buffer.x, right: rightMargin, columns: -deleted)
+        }
         
         updateRange (buffer.y)
     }
@@ -6201,10 +6264,15 @@ open class Terminal {
 
         let p = max (pars.count == 0 ? 1 : pars [0], 1)
         
+        let rightMargin = marginMode ? buffer.marginRight : cols-1
         for y in buffer.scrollTop...buffer.scrollBottom {
             let line = buffer.lines [buffer.yBase + y]
-            line.deleteCells(pos: buffer.x, n: p, rightMargin: marginMode ? buffer.marginRight : cols-1, fillData: buffer.getNullCell(attribute: eraseAttr()))
+            line.deleteCells(pos: buffer.x, n: p, rightMargin: rightMargin, fillData: buffer.getNullCell(attribute: eraseAttr()))
             line.isWrapped = false
+        }
+        let deleted = min (p, max (0, rightMargin - buffer.x + 1))
+        if deleted > 0 {
+            selectionsAdjustForInPlaceCellShift (top: buffer.yBase + buffer.scrollTop, bottom: buffer.yBase + buffer.scrollBottom, left: buffer.x, right: rightMargin, columns: -deleted)
         }
         updateRange (startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
     }
@@ -6550,6 +6618,12 @@ open class Terminal {
             }
             //line.isWrapped = false
         }
+        selectionsAdjustForInPlaceCellShift (
+            top: buffer.yBase + buffer.scrollTop,
+            bottom: buffer.yBase + buffer.scrollBottom,
+            left: at,
+            right: marginMode ? buffer.marginRight : cols - 1,
+            columns: back ? 1 : -1)
         updateRange (buffer.scrollTop)
         updateRange (buffer.scrollBottom)
     }
@@ -6879,7 +6953,14 @@ open class Terminal {
     public func changeScrollback (_ newScrollback: Int?)
     {
         // Only the normal buffer has scrollback, the alt buffer should never have scrollback.
+        let previousLineCount = normalBuffer.lines.count
         normalBuffer.changeHistorySize(newScrollback)
+        // Shrinking the history drops the oldest rows, moving everything below
+        // them up. Only meaningful while the normal buffer is the visible one.
+        let trimmedLineCount = previousLineCount - normalBuffer.lines.count
+        if trimmedLineCount > 0, buffer === normalBuffer {
+            selectionsAdjustForInPlaceScroll (top: 0, bottom: previousLineCount - 1, lines: trimmedLineCount)
+        }
 
         // Update the options to reflect the new scrollback size.
         options.scrollback = newScrollback ?? 0
