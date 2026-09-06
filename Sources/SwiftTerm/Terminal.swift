@@ -3444,15 +3444,16 @@ open class Terminal {
             let scrollBackSize = buffer.lines.count - rows
             if scrollBackSize > 0 {
                 let previousLineCount = buffer.lines.count
+                // Release the doomed rows' images while those rows still exist.
+                for row in 0..<scrollBackSize {
+                    buffer.clearImagesFromLine (at: row)
+                }
                 buffer.lines.trimStart (count: scrollBackSize)
                 buffer.linesTop = 0
                 buffer.yBase = max (buffer.yBase - scrollBackSize, 0)
                 buffer.yDisp = max (buffer.yDisp - scrollBackSize, 0)
                 // Every surviving row moved up by the trimmed count; anchors in
                 // the discarded rows have nothing left to point at.
-                for row in 0..<scrollBackSize {
-                    buffer.clearImagesFromLine (at: row)
-                }
                 selectionsAdjustForInPlaceScroll (top: 0, bottom: previousLineCount - 1, lines: scrollBackSize)
                 reconcileKittyPlacementsAfterRowMutation ()
             }
@@ -6981,15 +6982,23 @@ open class Terminal {
     {
         // Only the normal buffer has scrollback, the alt buffer should never have scrollback.
         let previousLineCount = normalBuffer.lines.count
+        // Work out which rows the shrink will discard while they still exist,
+        // so their images are released rather than orphaned. Derived the same
+        // way the buffer derives its own capacity.
+        let boundedScrollback = min (max (newScrollback ?? 0, 0), Int(Int32.max) - normalBuffer.rows)
+        let linesToTrim = max (0, previousLineCount - (normalBuffer.rows + boundedScrollback))
+        for row in 0..<linesToTrim {
+            normalBuffer.clearImagesFromLine (at: row)
+        }
         normalBuffer.changeHistorySize(newScrollback)
-        // Shrinking the history drops the oldest rows, moving everything below
-        // them up. Only meaningful while the normal buffer is the visible one.
         let trimmedLineCount = previousLineCount - normalBuffer.lines.count
-        if trimmedLineCount > 0, buffer === normalBuffer {
-            for row in 0..<trimmedLineCount {
-                normalBuffer.clearImagesFromLine (at: row)
+        if trimmedLineCount > 0 {
+            // Anchors only exist for the buffer on screen, but the placement
+            // table is shared, so it is reconciled either way. This runs while
+            // the alternate buffer is active too.
+            if buffer === normalBuffer {
+                selectionsAdjustForInPlaceScroll (top: 0, bottom: previousLineCount - 1, lines: trimmedLineCount)
             }
-            selectionsAdjustForInPlaceScroll (top: 0, bottom: previousLineCount - 1, lines: trimmedLineCount)
             reconcileKittyPlacementsAfterRowMutation (in: normalBuffer)
         }
 
