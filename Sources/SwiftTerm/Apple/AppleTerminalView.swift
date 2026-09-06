@@ -2862,10 +2862,10 @@ extension TerminalView {
     func feedPrepare()
     {
         search.invalidate()
-        // Preserve manual selection while output is streaming when mouse reporting is disabled.
-        if allowMouseReporting {
-            selection.active = false
-        }
+        // Incoming output does not own selection lifetime. Structural buffer
+        // mutations translate or invalidate the anchors instead, so a selection
+        // survives a command printing underneath it and is dropped only when the
+        // rows it points at actually stop existing.
         startDisplayUpdates()
     }
     

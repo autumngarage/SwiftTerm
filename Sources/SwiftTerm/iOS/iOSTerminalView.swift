@@ -1777,11 +1777,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     open func linefeed(source: Terminal) {
-        // Preserve manual selection while output is streaming when mouse reporting is disabled.
-        if allowMouseReporting {
-            selection.selectNone()
-            disableSelectionPanGesture()
-        }
+        // Incoming output does not own selection lifetime; structural buffer
+        // mutations translate or invalidate the anchors instead.
     }
     
     func updateScroller ()
