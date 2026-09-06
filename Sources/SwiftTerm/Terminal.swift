@@ -7027,6 +7027,29 @@ open class Terminal {
         }
     }
 
+    /// X10 carries each value in one byte after adding a protocol offset. The
+    /// clamp has to happen in integer space: `UInt8(min(32 + x + 1, 255))` still
+    /// traps for a negative coordinate, because `min` only bounds the top end
+    /// and the conversion is what rejects the value. A drag past the left or top
+    /// edge produces exactly that, so this was a reachable crash rather than a
+    /// theoretical one.
+    private func encodeX10Byte (_ value: Int, offset: Int) -> UInt8
+    {
+        let maximumValue = Int(UInt8.max) - offset
+        let boundedValue = min (max (value, 0), maximumValue)
+        return UInt8 (boundedValue + offset)
+    }
+
+    /// Mouse hit-testing is zero-based; the SGR protocols are one-based. The
+    /// cell variants already add one, but the pixel variant (DECSET 1016) sent
+    /// its coordinates raw, so every pixel report was off by one and a report at
+    /// the origin claimed pixel zero, which the protocol does not have.
+    private func oneBasedMouseCoordinate (_ coordinate: Int) -> Int
+    {
+        guard coordinate > 0 else { return 1 }
+        return coordinate == Int.max ? Int.max : coordinate + 1
+    }
+
     /**
      * Encodes the button action in the format expected by the client
      * - Parameter button: The button to encode
@@ -7089,7 +7112,11 @@ open class Terminal {
         //print ("got \(mouseProtocol)")
         switch mouseProtocol {
         case .x10:
-            sendResponse(cc.CSI, "M", [UInt8(min(buttonFlags+32, 255)), UInt8(min(32 + x+1, 255)), UInt8(min(32+y+1, 255))])
+            sendResponse(cc.CSI, "M", [
+                encodeX10Byte (buttonFlags, offset: 32),
+                encodeX10Byte (x, offset: 33),
+                encodeX10Byte (y, offset: 33),
+            ])
         case .sgr:
             let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
             let bflags : Int = isRelease ? (buttonFlags & ~3) : buttonFlags
@@ -7099,7 +7126,7 @@ open class Terminal {
             let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
             let bflags : Int = isRelease ? (buttonFlags & ~3) : buttonFlags
             let m = isRelease ? "m" : "M"
-            sendResponse(cc.CSI, "<\(bflags);\(pixelX);\(pixelY)\(m)")
+            sendResponse(cc.CSI, "<\(bflags);\(oneBasedMouseCoordinate (pixelX));\(oneBasedMouseCoordinate (pixelY))\(m)")
             
         case .urxvt:
             sendResponse(cc.CSI, "\(buttonFlags+32);\(x+1);\(y+1)M");
