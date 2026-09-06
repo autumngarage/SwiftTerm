@@ -352,6 +352,28 @@ open class Terminal {
     }
     private var selections: [WeakSelection] = []
 
+    /// True only while the delegate is being told that terminal storage moved or
+    /// invalidated selection anchors, rather than that anyone changed the
+    /// selection.
+    ///
+    /// Both arrive as `selectionChanged`, but they mean opposite things to a
+    /// host: one is coordinate maintenance for the selection the user already
+    /// has, the other is a new gesture. Without the distinction a host cannot
+    /// tell them apart, because a translated selection can even carry identical
+    /// text when the rows it moved across repeat.
+    public private(set) var isSelectionChangeStructural = false
+
+    /// Runs `body` with `isSelectionChangeStructural` set, so every
+    /// `selectionChanged` it causes is attributed to storage movement. Restores
+    /// the previous value rather than clearing it, so nesting is safe.
+    private func withStructuralSelectionChange (_ body: () -> Void)
+    {
+        let previous = isSelectionChangeStructural
+        isSelectionChangeStructural = true
+        defer { isSelectionChangeStructural = previous }
+        body ()
+    }
+
     func register (selection: SelectionService)
     {
         selections.removeAll { $0.value == nil }
@@ -365,8 +387,10 @@ open class Terminal {
     /// within the absolute row range `top...bottom`.
     func selectionsAdjustForInPlaceScroll (top: Int, bottom: Int, lines: Int)
     {
-        for entry in selections {
-            entry.value?.adjustForInPlaceScroll (top: top, bottom: bottom, lines: lines)
+        withStructuralSelectionChange {
+            for entry in selections {
+                entry.value?.adjustForInPlaceScroll (top: top, bottom: bottom, lines: lines)
+            }
         }
     }
 
@@ -374,8 +398,10 @@ open class Terminal {
     /// within the columns `left...right` (margin mode).
     func selectionsInvalidateForColumnRestrictedScroll (top: Int, bottom: Int, left: Int, right: Int)
     {
-        for entry in selections {
-            entry.value?.invalidateForColumnRestrictedScroll (top: top, bottom: bottom, left: left, right: right)
+        withStructuralSelectionChange {
+            for entry in selections {
+                entry.value?.invalidateForColumnRestrictedScroll (top: top, bottom: bottom, left: left, right: right)
+            }
         }
     }
 
