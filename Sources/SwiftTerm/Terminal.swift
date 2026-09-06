@@ -3528,6 +3528,7 @@ open class Terminal {
                 p -= 1
                 // test: echo -e '\e[44m\e[1L\e[0m'
                 // blankLine(true) - xterm/linux behavior
+                buffer.clearImagesFromLine (at: scrollBottomAbsolute - 1)
                 buffer.lines.splice (start: scrollBottomAbsolute - 1, deleteCount: 1, items: [],
                                      change: { line in updateRange (line) })
                 let newLine = buffer.getBlankLine (attribute: ea)
@@ -3536,6 +3537,7 @@ open class Terminal {
 
             // Rows below the cursor moved down in place.
             selectionsAdjustForInPlaceScroll (top: row, bottom: scrollBottomAbsolute - 1, lines: -inserted)
+            reconcileKittyPlacementsAfterRowMutation ()
             let firstMovedRow = row + inserted < scrollBottomAbsolute
                 ? row + inserted : nil
             hardenBidiLineShiftBoundaries(firstChangedRow: row,
@@ -6050,6 +6052,7 @@ open class Terminal {
             selectionsInvalidateForColumnRestrictedScroll (top: row, bottom: row + rowCount, left: buffer.marginLeft, right: buffer.marginRight)
         } else {
             for _ in 0..<p {
+                buffer.clearImagesFromLine (at: buffer.yBase + buffer.scrollBottom)
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollBottom, deleteCount: 1,
                                      items: [], change: { line in updateRange (line)})
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollTop, deleteCount: 0,
@@ -6060,6 +6063,7 @@ open class Terminal {
             let top = buffer.yBase + buffer.scrollTop
             let bottom = buffer.yBase + buffer.scrollBottom
             selectionsAdjustForInPlaceScroll (top: top, bottom: bottom, lines: -p)
+            reconcileKittyPlacementsAfterRowMutation ()
         }
         hardenBidiScrollBoundaries(insertedAtTop: true, count: p)
         // this.maxRange();
@@ -6093,6 +6097,7 @@ open class Terminal {
             selectionsInvalidateForColumnRestrictedScroll (top: row, bottom: row + rowCount, left: buffer.marginLeft, right: buffer.marginRight)
         } else {
             for _ in 0..<p {
+                buffer.clearImagesFromLine (at: buffer.yBase + buffer.scrollTop)
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollTop, deleteCount: 1,
                                      items: [], change: { line in updateRange (line)})
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollBottom, deleteCount: 0,
@@ -6103,6 +6108,7 @@ open class Terminal {
             let top = buffer.yBase + buffer.scrollTop
             let bottom = buffer.yBase + buffer.scrollBottom
             selectionsAdjustForInPlaceScroll (top: top, bottom: bottom, lines: p)
+            reconcileKittyPlacementsAfterRowMutation ()
         }
         hardenBidiScrollBoundaries(insertedAtTop: false, count: p)
         // this.maxRange();
@@ -6218,6 +6224,7 @@ open class Terminal {
                 for _ in 0..<p {
                     // test: echo -e '\e[44m\e[1M\e[0m'
                     // blankLine(true) - xterm/linux behavior
+                    buffer.clearImagesFromLine (at: row)
                     buffer.lines.splice (start: row, deleteCount: 1, items: [], change: { line in updateRange (line)})
                     buffer.lines.splice (start: j, deleteCount: 0,
                                          items: [buffer.getBlankLine (attribute: ea)],
@@ -6226,6 +6233,7 @@ open class Terminal {
 
                 // Rows below the cursor moved up in place.
                 selectionsAdjustForInPlaceScroll (top: row, bottom: j, lines: p)
+                reconcileKittyPlacementsAfterRowMutation ()
                 hardenBidiLineShiftBoundaries(firstChangedRow: row,
                                                firstMovedRow: nil,
                                                lastChangedRow: j)
