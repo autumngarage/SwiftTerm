@@ -49,19 +49,7 @@ let package = Package(
             exclude: platformExcludes + ["Mac/README.md"],
             resources: [
                 .process("Apple/Metal/Shaders.metal")
-            ],
-            plugins: [
-                .plugin(name: "SwiftTermBuildInfoPlugin")
             ]
-        ),
-        .executableTarget(
-            name: "SwiftTermBuildInfoGenerator",
-            path: "Sources/SwiftTermBuildInfoGenerator"
-        ),
-        .plugin(
-            name: "SwiftTermBuildInfoPlugin",
-            capability: .buildTool(),
-            dependencies: ["SwiftTermBuildInfoGenerator"]
         ),
         .testTarget(
             name: "SwiftTermTests",
