@@ -7198,6 +7198,12 @@ open class Terminal {
                 value = 64
             case 5:
                 value = 65
+            // Xterm numbers horizontal wheel motion as buttons 6 and 7,
+            // continuing the 64-block the vertical wheel uses.
+            case 6:
+                value = 66
+            case 7:
+                value = 67
             default:
                 value = 0
             }

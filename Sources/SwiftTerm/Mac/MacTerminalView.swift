@@ -3266,6 +3266,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Leftover fractional trackpad scroll (in points) carried between events so
     /// sub-cell precise deltas accumulate instead of being dropped.
     private var scrollAccumulator: CGFloat = 0
+    private var horizontalScrollAccumulator: CGFloat = 0
 
     /// Multiplier applied to wheel/trackpad scroll deltas. `1.0` scrolls at the
     /// system's native rate; values below `1.0` slow scrolling down, above speed
@@ -3279,12 +3280,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         // Preserves the previous `deltaY == 0` early exit, restated against the
         // delta this method now reads. Without it a zero delta would fall into
         // the non-precise branch below and be turned into a spurious -1 line.
-        if event.scrollingDeltaY == 0 {
+        // A horizontal-only event is still real input, so it is not an exit.
+        if event.scrollingDeltaY == 0 && event.scrollingDeltaX == 0 {
             return
         }
-        guard let cellHeight = cellDimension?.height, cellHeight > 0 else {
+        guard let cellDimension, cellDimension.height > 0, cellDimension.width > 0 else {
             return
         }
+        let cellHeight = cellDimension.height
 
         let reportsMouse = allowMouseReporting && !shiftBypassesMouseReporting(for: event) && terminal.mouseMode != .off
 
@@ -3320,7 +3323,22 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             let rounded = Int(scaledDelta.rounded())
             lines = rounded != 0 ? rounded : (event.scrollingDeltaY > 0 ? 1 : -1)
         }
-        if lines == 0 {
+        // The same translation for the horizontal axis. Trackpads emit it
+        // constantly, and an application that asked for mouse reporting expects
+        // it as xterm buttons 6 and 7.
+        let scaledHorizontalDelta = event.scrollingDeltaX * scrollSensitivity
+        let columns: Int
+        if event.hasPreciseScrollingDeltas {
+            horizontalScrollAccumulator += scaledHorizontalDelta
+            columns = Int(horizontalScrollAccumulator / cellDimension.width)
+            horizontalScrollAccumulator -= CGFloat(columns) * cellDimension.width
+        } else {
+            horizontalScrollAccumulator = 0
+            let rounded = Int(scaledHorizontalDelta.rounded())
+            columns = rounded != 0 ? rounded : (event.scrollingDeltaX > 0 ? 1 : (event.scrollingDeltaX < 0 ? -1 : 0))
+        }
+
+        if lines == 0 && columns == 0 {
             return
         }
         let scrollingUp = lines > 0
@@ -3330,11 +3348,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             let hit = calculateMouseHit(with: event)
             let displayBuffer = terminal.displayBuffer
             let screenRow = max (0, min (displayBuffer.rows - 1, hit.grid.row - displayBuffer.yDisp))
-            let button = scrollingUp ? 4 : 5
             let flags = event.modifierFlags
-            let buttonFlags = terminal.encodeButton(button: button, release: false, shift: flags.contains(.shift), meta: flags.contains(.option), control: flags.contains(.control))
-            for _ in 0..<magnitude {
-                terminal.sendEvent(buttonFlags: buttonFlags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
+            // Vertical is buttons 4/5, horizontal 7/6. A positive AppKit X delta
+            // is leftward motion.
+            for (count, positiveButton, negativeButton) in [(lines, 4, 5), (columns, 7, 6)] where count != 0 {
+                let buttonFlags = terminal.encodeButton(button: count > 0 ? positiveButton : negativeButton, release: false, shift: flags.contains(.shift), meta: flags.contains(.option), control: flags.contains(.control))
+                for _ in 0..<abs(count) {
+                    terminal.sendEvent(buttonFlags: buttonFlags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
+                }
             }
         } else if terminal.isDisplayBufferAlternate {
             for _ in 0..<magnitude {
@@ -3344,7 +3365,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                     sendKeyDown()
                 }
             }
-        } else {
+            for _ in 0..<abs(columns) {
+                if columns > 0 {
+                    sendKeyLeft()
+                } else {
+                    sendKeyRight()
+                }
+            }
+        } else if lines != 0 {
             if scrollingUp {
                 scrollUp(lines: magnitude)
             } else {
