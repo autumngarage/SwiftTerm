@@ -790,6 +790,13 @@ public final class Buffer {
         let newMaxLength = getCorrectBufferLength(newRows)
         if newMaxLength > lines.maxLength {
             lines.maxLength = newMaxLength
+        } else if newMaxLength < lines.maxLength, lines.count == 0 {
+            // An empty buffer has nothing to lose by shrinking now, and the
+            // shrink further down only runs once there are lines to adjust.
+            // The alternate buffer is routinely resized before first use and
+            // has no scrollback, so without this it keeps whatever capacity the
+            // largest window it ever saw needed.
+            lines.maxLength = newMaxLength
         }
         if lines.count > 0 {
             // Deal with columns increasing (reducing needs to happen after reflow)

@@ -3450,7 +3450,11 @@ open class Terminal {
                 buffer.yDisp = max (buffer.yDisp - scrollBackSize, 0)
                 // Every surviving row moved up by the trimmed count; anchors in
                 // the discarded rows have nothing left to point at.
+                for row in 0..<scrollBackSize {
+                    buffer.clearImagesFromLine (at: row)
+                }
                 selectionsAdjustForInPlaceScroll (top: 0, bottom: previousLineCount - 1, lines: scrollBackSize)
+                reconcileKittyPlacementsAfterRowMutation ()
             }
             break;
         default:
@@ -6974,7 +6978,11 @@ open class Terminal {
         // them up. Only meaningful while the normal buffer is the visible one.
         let trimmedLineCount = previousLineCount - normalBuffer.lines.count
         if trimmedLineCount > 0, buffer === normalBuffer {
+            for row in 0..<trimmedLineCount {
+                normalBuffer.clearImagesFromLine (at: row)
+            }
             selectionsAdjustForInPlaceScroll (top: 0, bottom: previousLineCount - 1, lines: trimmedLineCount)
+            reconcileKittyPlacementsAfterRowMutation (in: normalBuffer)
         }
 
         // Update the options to reflect the new scrollback size.

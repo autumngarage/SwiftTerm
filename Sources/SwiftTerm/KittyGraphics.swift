@@ -1331,8 +1331,35 @@ extension Terminal {
     }
 
     func updateKittyRelativePlacementsForCurrentBuffer() {
-        let isAlt = isCurrentBufferAlternate
-        let positions = collectKittyPlacementPositions(in: buffer)
+        updateKittyRelativePlacements(in: buffer, isAlternateBuffer: isCurrentBufferAlternate)
+    }
+
+    /// Reconciles placements after rows moved, but only when there is something
+    /// to reconcile. Called from every row mutation, so the guard is what keeps
+    /// ordinary scrolling from walking the placement table on each line.
+    func reconcileKittyPlacementsAfterRowMutation(in targetBuffer: Buffer? = nil) {
+        let targetBuffer = targetBuffer ?? buffer
+        let isAlt = targetBuffer === altBuffer
+        let hasTrackedPlacements = kittyGraphicsState.placementsByKey.values.contains { record in
+            record.isAlternateBuffer == isAlt
+        }
+        guard targetBuffer.hasAnyImages || hasTrackedPlacements else { return }
+        updateKittyRelativePlacements(in: targetBuffer, isAlternateBuffer: isAlt)
+    }
+
+    private func updateKittyRelativePlacements(in targetBuffer: Buffer, isAlternateBuffer isAlt: Bool) {
+        let positions = collectKittyPlacementPositions(in: targetBuffer)
+
+        // A placement whose row no longer exists is gone, not merely unmoved.
+        // Leaving the record behind kept the image alive forever, so a session
+        // that scrolled images out of the scrollback never released their bytes.
+        let missingRecords = kittyGraphicsState.placementsByKey.filter { key, record in
+            record.isAlternateBuffer == isAlt && !record.isVirtual && positions[key] == nil
+        }
+        let orphanedImageIds = Set(missingRecords.values.map(\.imageId))
+        for key in missingRecords.keys {
+            kittyGraphicsState.placementsByKey.removeValue(forKey: key)
+        }
 
         for (key, record) in kittyGraphicsState.placementsByKey where record.isAlternateBuffer == isAlt {
             if record.isVirtual {
@@ -1372,7 +1399,7 @@ extension Terminal {
             let current = positions[key] ?? (row: record.row, col: record.col)
             let deltaRow = desired.row - current.row
             if deltaRow != 0 || desired.col != current.col {
-                moveKittyPlacementImages(in: buffer,
+                moveKittyPlacementImages(in: targetBuffer,
                                          key: key,
                                          deltaRow: deltaRow,
                                          newTopRow: desired.row,
@@ -1381,6 +1408,12 @@ extension Terminal {
             updated.row = desired.row
             updated.col = desired.col
             kittyGraphicsState.placementsByKey[key] = updated
+        }
+
+        // Only sweep when a record actually went away, so the common case of
+        // rows moving with their placements intact costs nothing.
+        if !orphanedImageIds.isEmpty {
+            cleanupUnusedKittyImages()
         }
     }
 
