@@ -2851,8 +2851,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         terminal.sendEvent(buttonFlags: buttonFlags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
     }
     
-    private var autoScrollDelta = 0
-    private var selectionAutoScrollTimer: Timer?
+    // Readable, not writable, from tests: selection auto-scroll is otherwise
+    // only observable by waiting on a 50 ms timer, and a suite that waits on
+    // wall-clock time to decide whether scrolling started is a flake.
+    private(set) var autoScrollDelta = 0
+    private(set) var selectionAutoScrollTimer: Timer?
     // Last mouse location (view coordinates) seen during a selection drag, used
     // to re-extend the selection as the auto-scroll timer advances the viewport
     // while the pointer is held still past the top or bottom edge.
@@ -2881,6 +2884,17 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     // Callback from the selection auto-scroll timer: advance the viewport while
     // the pointer is held past an edge, and grow the selection to match.
     private func scrollingTimerElapsed (source: Timer)
+    {
+        performSelectionAutoScrollStep ()
+    }
+
+    /// One auto-scroll tick, exactly as the timer would deliver it.
+    ///
+    /// Split out so the behaviour can be driven deterministically. Asserting on
+    /// it through the timer means sleeping past its interval and hoping the run
+    /// loop ran, which is precisely the kind of wall-clock race that makes a
+    /// suite flaky under load.
+    func performSelectionAutoScrollStep ()
     {
         if autoScrollDelta == 0 {
             return
