@@ -7148,6 +7148,20 @@ open class Terminal {
         }
     }
 
+    /// Whether an X10-encoded button value describes a button being released.
+    ///
+    /// X10 spends the low two bits on both "button 3" and "released", so the
+    /// other bits have to disambiguate. The motion bit (32) separates a release
+    /// from pointer motion with no button held. The wheel bit (64) separates it
+    /// from wheel motion, which is never a release and whose horizontal buttons
+    /// 6 and 7 encode to 66 and 67 — and 67 ends in the same two bits, so a
+    /// horizontal wheel report was being sent as a release with its button
+    /// stripped.
+    static func isSGRRelease (_ buttonFlags: Int) -> Bool
+    {
+        (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0 && (buttonFlags & 64) == 0
+    }
+
     /// X10 carries each value in one byte after adding a protocol offset. The
     /// clamp has to happen in integer space: `UInt8(min(32 + x + 1, 255))` still
     /// traps for a negative coordinate, because `min` only bounds the top end
@@ -7245,12 +7259,12 @@ open class Terminal {
                 encodeX10Byte (y, offset: 33),
             ])
         case .sgr:
-            let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
+            let isRelease = Terminal.isSGRRelease (buttonFlags)
             let bflags : Int = isRelease ? (buttonFlags & ~3) : buttonFlags
             let m = isRelease ? "m" : "M"
             sendResponse(cc.CSI, "<\(bflags);\(x+1);\(y+1)\(m)")
         case .sgrPixel:
-            let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
+            let isRelease = Terminal.isSGRRelease (buttonFlags)
             let bflags : Int = isRelease ? (buttonFlags & ~3) : buttonFlags
             let m = isRelease ? "m" : "M"
             sendResponse(cc.CSI, "<\(bflags);\(oneBasedMouseCoordinate (pixelX));\(oneBasedMouseCoordinate (pixelY))\(m)")
