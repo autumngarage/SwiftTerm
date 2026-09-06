@@ -1576,6 +1576,21 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     // doCommand/noop: - but more research needs to take place to figure out the priority
     // of those keys.
     //
+    /// Option+Left/Right on the normal screen, which is word motion rather than
+    /// a modified arrow.
+    ///
+    /// The legacy encoder below would turn the chord into `CSI 1;3D`, which is
+    /// right for a full-screen application and wrong at a shell prompt, where
+    /// readline and zsh bind `ESC b` and `ESC f` and macOS users expect the word
+    /// to move. The alternate screen is what separates the two, so this only
+    /// stands aside on the normal one; the handler further down encodes both.
+    private func isShellWordMotionChord (_ functionKey: KittyFunctionalKey, eventFlags: NSEvent.ModifierFlags) -> Bool
+    {
+        guard optionAsMetaKey, eventFlags.contains (.option) else { return false }
+        guard functionKey == .left || functionKey == .right else { return false }
+        return !terminal.isCurrentBufferAlternate
+    }
+
     open override func keyDown(with event: NSEvent) {
         selection.active = false
         let eventFlags = event.modifierFlags
@@ -1590,7 +1605,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         if terminal.keyboardEnhancementFlags.isEmpty,
            !eventFlags.contains(.command),
            (!eventFlags.contains(.option) || optionAsMetaKey),
-           let functionKey = kittyFunctionalKey(from: event) {
+           let functionKey = kittyFunctionalKey(from: event),
+           !isShellWordMotionChord(functionKey, eventFlags: eventFlags) {
             let modifiers = kittyModifiers(from: event, includeOption: optionAsMetaKey)
             let isUnmodifiedPageKey = (functionKey == .pageUp || functionKey == .pageDown)
                 && modifiers.intersection([.shift, .alt, .ctrl]).isEmpty
