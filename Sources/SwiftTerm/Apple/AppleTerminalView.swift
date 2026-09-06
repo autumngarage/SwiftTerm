@@ -1123,7 +1123,6 @@ extension TerminalView {
         let column: Int
         let columnWidth: Int
         private var attributedString = NSMutableAttributedString()
-        private var characterCount: Int = 0
         private var utf16ToCellOrdinal: [Int] = []
         private var cellCount: Int = 0
         private var utf16IsCellIdentity = true
@@ -1134,7 +1133,7 @@ extension TerminalView {
         }
         
         var isEmpty: Bool {
-            characterCount == 0
+            cellCount == 0
         }
         
         /// Appends a batch of text; `cellUTF16Lengths` holds one entry per
@@ -1142,7 +1141,6 @@ extension TerminalView {
         mutating func append(text: String, attributes: [NSAttributedString.Key: Any],
                              cellUTF16Lengths: [Int]) {
             attributedString.append(NSAttributedString(string: text, attributes: attributes))
-            characterCount += 1
             for length in cellUTF16Lengths {
                 let units = max(1, length)
                 if units != 1 {
@@ -1159,7 +1157,10 @@ extension TerminalView {
             guard !isEmpty else {
                 return nil
             }
-            return ViewLineSegment(column: column, columnWidth: columnWidth, characterCount: characterCount, attributedString: attributedString, utf16ToCellOrdinal: utf16ToCellOrdinal, utf16IsCellIdentity: utf16IsCellIdentity)
+            // `cellCount`, not the number of append calls. Characters are
+            // batched by attribute run, so counting calls reported 1 for an
+            // ordinary row and made `columnSpan` describe a single cell.
+            return ViewLineSegment(column: column, columnWidth: columnWidth, characterCount: cellCount, attributedString: attributedString, utf16ToCellOrdinal: utf16ToCellOrdinal, utf16IsCellIdentity: utf16IsCellIdentity)
         }
     }
     
