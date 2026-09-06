@@ -6739,6 +6739,7 @@ open class Terminal {
         } else if scrollTop == 0 {
             // Determine whether the buffer is going to be trimmed after insertion.
             let willBufferBeTrimmed = lines.isFull
+            let previousLineCount = lines.count
 
             // Insert the line using the fastest method
             if bottomRow == lines.count - 1 {
@@ -6762,14 +6763,28 @@ open class Terminal {
                 if !userScrolling {
                     buffer.yDisp += 1
                 }
+                if bottomRow < previousLineCount - 1 {
+                    // A top-anchored region that does not reach the end of the
+                    // buffer: the blank is spliced in below it, so rows past the
+                    // region keep their text but move one index further down.
+                    // Rows inside the region are unaffected in absolute terms,
+                    // which is why this starts below it rather than at zero.
+                    selectionsAdjustForInPlaceScroll (top: bottomRow + 1, bottom: previousLineCount, lines: -1)
+                }
             } else {
                 if hasScrollback {
                     buffer.linesTop += 1
                 }
 
                 // Recycling removes the first buffer row and shifts every
-                // remaining row up without changing yDisp.
-                selectionsAdjustForInPlaceScroll (top: 0, bottom: lines.count - 1, lines: 1)
+                // remaining row up without changing yDisp. When the region does
+                // not reach the end of the buffer, only the rows inside it move:
+                // splicing plus trimming leaves everything below at its original
+                // index.
+                selectionsAdjustForInPlaceScroll (
+                    top: 0,
+                    bottom: bottomRow == previousLineCount - 1 ? previousLineCount - 1 : bottomRow,
+                    lines: 1)
 
                 // When the buffer is full and the user has scrolled up, keep the text
                 // stable unless ydisp is right at the top

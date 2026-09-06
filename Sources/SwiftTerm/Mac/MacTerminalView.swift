@@ -3075,14 +3075,21 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             selection.startSelection()
         }
         didSelectionDrag = true
-        lastSelectionDragPoint = convert(event.locationInWindow, from: nil)
+        let dragPoint = convert(event.locationInWindow, from: nil)
+        lastSelectionDragPoint = dragPoint
         autoScrollDelta = 0
-        let screenRow = hit.row - displayBuffer.yDisp
+        // Trigger on the pointer leaving the view, not on the row it lands in.
+        // Deriving it from the screen row starts auto-scrolling as soon as the
+        // pointer reaches the top or bottom visible row, so those rows cannot be
+        // selected: the content scrolls out from under the pointer the moment it
+        // gets there. Only a pointer actually past an edge is asking for more.
         if selection.active {
-            if screenRow <= 0 {
-                autoScrollDelta = calcScrollingVelocity(delta: screenRow * -1) * -1
-            } else if screenRow >= displayBuffer.rows {
-                autoScrollDelta = calcScrollingVelocity(delta: screenRow - displayBuffer.rows)
+            if dragPoint.y > bounds.maxY {
+                let rowsBeyondEdge = max(1, Int((dragPoint.y - bounds.maxY) / cellDimension.height))
+                autoScrollDelta = calcScrollingVelocity(delta: rowsBeyondEdge) * -1
+            } else if dragPoint.y < bounds.minY {
+                let rowsBeyondEdge = max(1, Int((bounds.minY - dragPoint.y) / cellDimension.height))
+                autoScrollDelta = calcScrollingVelocity(delta: rowsBeyondEdge)
             }
         }
         // Keep auto-scrolling while the pointer is held past an edge; the mouse
