@@ -211,6 +211,10 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate, LocalPr
     /**
      * Implements the LocalProcessDelegate.getWindowSize method
      */
+    /// Implements the `LocalProcessDelegate` output-drain boundary. Subclasses
+    /// override this to finalize state derived from the complete byte stream.
+    open func processOutputDrained (_ source: LocalProcess) {}
+
     open func getWindowSize () -> winsize
     {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1

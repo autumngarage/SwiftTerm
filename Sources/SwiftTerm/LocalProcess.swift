@@ -30,6 +30,22 @@ public protocol LocalProcessDelegate: AnyObject {
 
     /// This method should return the window size to report to the local process.
     func getWindowSize () -> winsize
+
+    /// Invoked once the PTY read stream has reached EOF *and* every byte already
+    /// read has been handed to `dataReceived`.
+    ///
+    /// `processTerminated` is not that point: the child can exit while output it
+    /// already wrote is still queued for delivery, so anything derived from the
+    /// complete byte stream (a saved recording, a transcript, a checksum) would
+    /// be finalized short. After this call no further `dataReceived` will be
+    /// made for this process.
+    ///
+    /// The default implementation does nothing.
+    func processOutputDrained (_ source: LocalProcess)
+}
+
+public extension LocalProcessDelegate {
+    func processOutputDrained (_ source: LocalProcess) {}
 }
 
 /**
@@ -123,6 +139,13 @@ public class LocalProcess {
     private let pendingLowWaterBytes = 1 * 1024 * 1024
     private var pendingBytes = 0
     private var readSuspendedForBackpressure = false
+    // The output-drain boundary has two halves, and EOF alone is not it: chunks
+    // already read can still be sitting in `pendingChunks`. Both facts live under
+    // `pendingLock` so the two threads that can complete the pair — the read queue
+    // seeing EOF, and the delivery queue emptying the backlog — cannot both decide
+    // they were last.
+    private var outputEOFSeen = false
+    private var outputDrainDelivered = false
     
     #if false //canImport(Subprocess)
     // Swift Subprocess related properties
@@ -170,6 +193,35 @@ public class LocalProcess {
         return keepReading
     }
 
+    /// Delivers the drain boundary exactly once, and only when both halves hold:
+    /// EOF seen, and nothing left queued. Called from the read queue on EOF and
+    /// from the delivery queue when the backlog empties, so whichever completes
+    /// the pair last is the one that delivers.
+    ///
+    /// The delegate is called on the same queue as `dataReceived`, so a client
+    /// observes the boundary strictly after every byte it was given and never
+    /// concurrently with one. The lock is released first: the delegate is host
+    /// code and may re-enter.
+    private func deliverOutputDrainIfComplete(alreadyOnDeliveryQueue: Bool) {
+        pendingLock.lock()
+        let backlogEmpty = pendingChunkIndex >= pendingChunks.count
+        let shouldDeliver = outputEOFSeen && backlogEmpty && !outputDrainDelivered
+        if shouldDeliver {
+            outputDrainDelivered = true
+        }
+        pendingLock.unlock()
+        guard shouldDeliver else { return }
+
+        if alreadyOnDeliveryQueue {
+            delegate?.processOutputDrained(self)
+        } else {
+            dispatchQueue.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.processOutputDrained(self)
+            }
+        }
+    }
+
     // Re-arm the PTY read loop after a backpressure pause.
     private func resumePtyRead() {
         guard running, let io else { return }
@@ -206,6 +258,7 @@ public class LocalProcess {
                 pendingBytes = 0
                 pendingScheduled = false
                 pendingLock.unlock()
+                deliverOutputDrainIfComplete(alreadyOnDeliveryQueue: true)
                 return
             }
             pendingLock.unlock()
@@ -313,6 +366,12 @@ public class LocalProcess {
         
         if data.count == 0 {
             childfd = -1
+            pendingLock.lock()
+            outputEOFSeen = true
+            pendingLock.unlock()
+            // Not on the delivery queue here, so hop; the backlog may already be
+            // empty, in which case this call is the one that delivers.
+            deliverOutputDrainIfComplete(alreadyOnDeliveryQueue: false)
             if running {
                 // Keep process monitor alive so the exit event can still deliver
                 // processTerminated to clients when PTY EOF arrives first.
@@ -403,6 +462,10 @@ public class LocalProcess {
         if running {
             return
         }
+        pendingLock.lock()
+        outputEOFSeen = false
+        outputDrainDelivered = false
+        pendingLock.unlock()
         
         #if false //canImport(Subprocess)
         startProcessWithSubprocess(executable: executable, args: args, environment: environment, execName: execName, currentDirectory: currentDirectory)
